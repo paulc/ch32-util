@@ -1,6 +1,8 @@
 use core::arch::asm;
 use core::ptr::{read_volatile, write_volatile};
 
+use crate::sdi_write::FormatHex;
+
 const PAINT: u32 = 0xAAAA_AAAA;
 const RAM_TOP: usize = 0x2000_0800; // 2 KB SRAM base 0x2000_0000
 
@@ -37,4 +39,14 @@ pub fn stack_headroom() -> (usize, usize) {
     let sp: usize;
     unsafe { core::arch::asm!("mv {}, sp", out(reg) sp) };
     (sp, hwm)
+}
+
+pub fn print_stack_info(key: &[u8]) {
+    let (sp, hwm) = stack_headroom();
+    crate::sdi_writeln!(
+        b"STACK:",
+        key,
+        &(sp as u32).fmt_hex(),
+        &(hwm as u32).fmt_hex()
+    );
 }
