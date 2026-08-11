@@ -12,6 +12,45 @@ impl uWrite for Sdi {
     }
 }
 
+type BlockingUartTx =
+    ch32_hal::usart::UartTx<'static, ch32_hal::peripherals::USART1, ch32_hal::mode::Blocking>;
+
+pub struct UartFmt {
+    uart_tx: BlockingUartTx,
+}
+
+impl UartFmt {
+    pub fn new(uart_tx: BlockingUartTx) -> Self {
+        Self { uart_tx }
+    }
+    pub fn write(&mut self, buffer: &[u8]) -> Result<(), ch32_hal::usart::Error> {
+        self.uart_tx.blocking_write(buffer)
+    }
+    pub fn flush(&mut self) -> Result<(), ch32_hal::usart::Error> {
+        self.uart_tx.blocking_flush()
+    }
+}
+
+impl uWrite for UartFmt {
+    type Error = ch32_hal::usart::Error;
+
+    // Translate '\n' into '\r\n' for serial output
+    fn write_str(&mut self, s: &str) -> Result<(), Self::Error> {
+        let mut rest = s.as_bytes();
+        while let Some(i) = rest.iter().position(|&b| b == b'\n') {
+            let (head, tail) = rest.split_at(i);
+            self.uart_tx.blocking_write(head)?;
+            if head.last() == Some(&b'\r') {
+                self.uart_tx.blocking_write(b"\n")?;
+            } else {
+                self.uart_tx.blocking_write(b"\r\n")?;
+            }
+            rest = &tail[1..];
+        }
+        self.uart_tx.blocking_write(rest)
+    }
+}
+
 #[macro_export]
 macro_rules! sdi_println {
     ($($arg:tt)*) => {

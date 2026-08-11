@@ -1,8 +1,8 @@
 //! Minimal PWR / auto-wakeup (AWU) wrapper for the CH32V003.
 //!
-//! ch32-metapac defines `pwr_v00x` but does not instantiate PWR for the V003
-//! chip, so this drives the registers directly. Addresses are from section 2.4
-//! of the CH32V003 reference manual:
+//! ch32-metapac defines `pwr_v00x` but does not instantiate PWR for the V003,
+//! so this drives the registers directly. Addresses from section 2.4 of the
+//! CH32V003 reference manual:
 //!
 //! ```text
 //! R32_PWR_CTLR    0x40007000  Power control            reset 0x00000000
@@ -12,36 +12,68 @@
 //! R32_PWR_AWUPSC  0x40007010  Auto-wakeup prescaler    reset 0x00000000
 //! ```
 //!
-//! The AWU counter is clocked by the LSI (nominally 128 kHz), an untrimmed RC
-//! oscillator with wide tolerance over temperature and supply. Treat all
-//! periods as approximate.
+//! Setup order matters:
 //!
-//! IMPORTANT: the V003 does not stop the IWDG in standby. If you sleep for
-//! longer than the watchdog period you will be reset by the watchdog rather
-//! than woken by the AWU. The two features are effectively mutually exclusive
-//! on this part unless the sleep is short.
+//! ```ignore
+//! pwr_enable()?;              // APB1 clock — without this, PWR writes vanish
+//! lsi_enable()?;              // AWU counter clock
+//! awu_configure(psc, ms)?;
+//! awu_enable();
+//! standby();
+//! ```
+//!
+//! The AWU counter is clocked by the LSI (nominally 128 kHz), an untrimmed RC
+//! oscillator with wide tolerance. Treat all periods as approximate.
+//!
+//! IMPORTANT: the V003 does not stop the IWDG in standby. Sleeping longer than
+//! the watchdog period gets you a watchdog reset rather than an AWU wake.
 
 use core::ptr::{read_volatile, write_volatile};
 
+// ---------------------------------------------------------------- PWR
+
 const PWR_BASE: usize = 0x4000_7000;
-const CTLR: *mut u32 = PWR_BASE as *mut u32;
-const AWUCSR: *mut u32 = (PWR_BASE + 0x08) as *mut u32;
-const AWUWR: *mut u32 = (PWR_BASE + 0x0C) as *mut u32;
-const AWUPSC: *mut u32 = (PWR_BASE + 0x10) as *mut u32;
+const PWR_CTLR: *mut u32 = PWR_BASE as *mut u32;
+const PWR_CSR: *const u32 = (PWR_BASE + 0x04) as *const u32;
+const PWR_AWUCSR: *mut u32 = (PWR_BASE + 0x08) as *mut u32;
+const PWR_AWUWR: *mut u32 = (PWR_BASE + 0x0C) as *mut u32;
+const PWR_AWUPSC: *mut u32 = (PWR_BASE + 0x10) as *mut u32;
 
 const CTLR_PDDS: u32 = 1 << 1; // 1 = standby, 0 = sleep
 const AWUCSR_AWUEN: u32 = 1 << 1;
 
-/// QingKe PFIC system control register. Bit 2 (SLEEPDEEP) must be set for
-/// `wfi` to reach standby rather than sleep. Verify this address against the
-/// PFIC chapter of the reference manual before relying on it.
+// ---------------------------------------------------------------- RCC
+
+const RCC_APB1PCENR: *mut u32 = 0x4002_101C as *mut u32;
+const APB1_PWREN: u32 = 1 << 28;
+
+const RCC_RSTSCKR: *mut u32 = 0x4002_1024 as *mut u32;
+const RSTSCKR_LSION: u32 = 1 << 0;
+const RSTSCKR_LSIRDY: u32 = 1 << 1;
+
+// ---------------------------------------------------------------- EXTI
+
+const EXTI_BASE: usize = 0x4001_0400;
+const EXTI_INTENR: *mut u32 = EXTI_BASE as *mut u32; // 0x00
+const EXTI_EVENR: *mut u32 = (EXTI_BASE + 0x04) as *mut u32; // 0x04
+const EXTI_RTENR: *mut u32 = (EXTI_BASE + 0x08) as *mut u32; // 0x08
+const EXTI_FTENR: *mut u32 = (EXTI_BASE + 0x0C) as *mut u32; // 0x0C
+const EXTI_INTFR: *mut u32 = (EXTI_BASE + 0x14) as *mut u32; // 0x14, write 1 to clear
+
+/// The AWU is routed to the core as EXTI line 9.
+const EXTI_AWU: u32 = 1 << 9;
+
+// ---------------------------------------------------------------- PFIC
+
 const PFIC_SCTLR: *mut u32 = 0xE000_ED10 as *mut u32;
 const SCTLR_SLEEPDEEP: u32 = 1 << 2;
+const SCTLR_WFITOWFE: u32 = 1 << 3;
 
 const LSI_HZ: u32 = 128_000;
+const LSI_SPIN_LIMIT: u32 = 100_000;
 
-/// AWU counter prescaler. The encoding is irregular — it is not a simple
-/// power-of-two exponent, and the top two values jump to /10240 and /61440.
+/// AWU counter prescaler. The encoding is irregular — not a power-of-two
+/// exponent, and the top two values jump to /10240 and /61440.
 #[derive(Clone, Copy)]
 #[repr(u32)]
 pub enum Prescaler {
@@ -99,8 +131,6 @@ impl Prescaler {
     }
 }
 
-/// Why a requested wake-up interval could not be configured.
-///
 /// Deliberately has no `Debug` impl: deriving one would pull `core::fmt` into
 /// the binary via `Result::unwrap`. Match on this rather than unwrapping.
 #[derive(Clone, Copy)]
@@ -109,15 +139,49 @@ pub enum Error {
     TooShort,
     /// Interval needs more than 64 counts at this prescaler.
     TooLong,
+    /// LSIRDY never came up.
+    LsiTimeout,
+    /// PWR registers did not accept writes — check the APB1 clock enable.
+    PwrNotClocked,
 }
 
-/// Configure the auto-wakeup timer. The window value is compared against an
-/// up-counter; a wake-up fires when they match.
+/// Enable the PWR peripheral's APB1 clock.
 ///
-/// With literal arguments the arithmetic constant-folds away; a runtime
+/// Without this every write to PWR_CTLR/AWUCSR/AWUWR/AWUPSC is silently
+/// discarded and reads back as zero. Call before anything else here.
+pub fn pwr_enable() -> Result<(), Error> {
+    unsafe {
+        write_volatile(RCC_APB1PCENR, read_volatile(RCC_APB1PCENR) | APB1_PWREN);
+        // AWUWR resets to 0x3F, so a zero read means the block is still dark.
+        if read_volatile(PWR_AWUWR) & 0x3F == 0 {
+            return Err(Error::PwrNotClocked);
+        }
+    }
+    Ok(())
+}
+
+/// Enable the LSI. The AWU has no clock without it, and unlike the IWDG,
+/// enabling the AWU does not start the LSI implicitly.
+pub fn lsi_enable() -> Result<(), Error> {
+    unsafe {
+        write_volatile(RCC_RSTSCKR, read_volatile(RCC_RSTSCKR) | RSTSCKR_LSION);
+        let mut spins = 0u32;
+        while read_volatile(RCC_RSTSCKR) & RSTSCKR_LSIRDY == 0 {
+            spins += 1;
+            if spins > LSI_SPIN_LIMIT {
+                return Err(Error::LsiTimeout);
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Configure the auto-wakeup counter. The window value is compared against an
+/// up-counter; a wake fires when they match.
+///
+/// With literal arguments the arithmetic constant-folds; a runtime
 /// `interval_ms` pulls in a software divide (`__udivsi3`) on this core.
 pub fn awu_configure(psc: Prescaler, interval_ms: u32) -> Result<(), Error> {
-    // interval = (AWUWR + 1) * divider / LSI_HZ
     let ticks_per_ms = LSI_HZ / 1000; // 128
     if interval_ms > u32::MAX / ticks_per_ms {
         return Err(Error::TooLong);
@@ -131,8 +195,8 @@ pub fn awu_configure(psc: Prescaler, interval_ms: u32) -> Result<(), Error> {
     }
 
     unsafe {
-        write_volatile(AWUPSC, psc as u32);
-        write_volatile(AWUWR, (counts - 1) & 0x3F);
+        write_volatile(PWR_AWUPSC, psc as u32);
+        write_volatile(PWR_AWUWR, (counts - 1) & 0x3F);
     }
     Ok(())
 }
@@ -142,42 +206,128 @@ pub const fn actual_ms(psc: Prescaler, window: u8) -> u32 {
     ((window as u32 + 1) * psc.divider()) / (LSI_HZ / 1000)
 }
 
-#[inline]
+/// Route the AWU to the core via EXTI line 9 and enable the counter.
+///
+/// Both edges are enabled: which one the AWU presents is not stated clearly in
+/// the manual, and enabling both costs nothing.
 pub fn awu_enable() {
-    unsafe { write_volatile(AWUCSR, AWUCSR_AWUEN) };
-}
-
-#[inline]
-pub fn awu_disable() {
-    unsafe { write_volatile(AWUCSR, 0) };
-}
-
-/// Enter sleep mode: the core clock stops, peripherals keep running, and any
-/// enabled interrupt wakes it. Execution resumes at the instruction after the
-/// `wfi`.
-#[inline]
-pub fn sleep() {
     unsafe {
-        write_volatile(CTLR, read_volatile(CTLR) & !CTLR_PDDS);
-        write_volatile(PFIC_SCTLR, read_volatile(PFIC_SCTLR) & !SCTLR_SLEEPDEEP);
-        core::arch::asm!("wfi");
+        write_volatile(EXTI_EVENR, read_volatile(EXTI_EVENR) | EXTI_AWU);
+        write_volatile(EXTI_INTENR, read_volatile(EXTI_INTENR) | EXTI_AWU);
+        write_volatile(EXTI_RTENR, read_volatile(EXTI_RTENR) | EXTI_AWU);
+        write_volatile(EXTI_FTENR, read_volatile(EXTI_FTENR) | EXTI_AWU);
+        write_volatile(PWR_AWUCSR, AWUCSR_AWUEN);
     }
 }
 
-/// Enter standby mode. Much lower current than `sleep`, but most of the chip
-/// is powered down.
+pub fn awu_disable() {
+    unsafe {
+        write_volatile(PWR_AWUCSR, 0);
+        write_volatile(EXTI_EVENR, read_volatile(EXTI_EVENR) & !EXTI_AWU);
+        write_volatile(EXTI_INTENR, read_volatile(EXTI_INTENR) & !EXTI_AWU);
+    }
+}
+
+/// Clear a pending AWU event on EXTI line 9.
+#[inline]
+pub fn awu_clear_pending() {
+    unsafe { write_volatile(EXTI_INTFR, EXTI_AWU) };
+}
+
+/// Restart the AWU counter from zero and clear any pending event.
 ///
-/// Call `awu_configure` and `awu_enable` first, or nothing will wake it.
+/// The AWU is a free-running up-counter compared against the window value;
+/// entering standby does not reset it. Without this, the second and every
+/// subsequent sleep returns immediately because the counter is already at or
+/// past the window. Cycling AWUEN holds the counter in reset and restarts it.
+#[inline]
+pub fn awu_restart() {
+    unsafe {
+        write_volatile(PWR_AWUCSR, 0);
+        // Rewriting the window reloads the comparator on some revisions;
+        // harmless if it doesn't.
+        let wr = read_volatile(PWR_AWUWR) & 0x3F;
+        write_volatile(PWR_AWUWR, wr);
+        write_volatile(PWR_AWUCSR, AWUCSR_AWUEN);
+    }
+    awu_clear_pending();
+}
+
+/// Enter sleep: core clock stops, peripherals keep running, any enabled
+/// interrupt or event wakes it. Execution resumes after the `wfi`.
 ///
-/// NOTE: whether the V003 resumes after the `wfi` or restarts through the
-/// reset vector on wake is worth confirming on hardware — print a marker at
-/// boot and see whether it reappears. If it restarts, RAM contents are not
-/// guaranteed and any state must be recomputed.
+/// NOTE: under Embassy this wakes on the next time-driver tick or task alarm,
+/// not on the AWU — every peripheral interrupt is still live in sleep mode.
+/// Use `standby` if you want the AWU to define the wake interval.
+#[inline]
+pub fn sleep() {
+    awu_restart();
+    unsafe {
+        write_volatile(PWR_CTLR, read_volatile(PWR_CTLR) & !CTLR_PDDS);
+        write_volatile(
+            PFIC_SCTLR,
+            (read_volatile(PFIC_SCTLR) & !SCTLR_SLEEPDEEP) | SCTLR_WFITOWFE,
+        );
+        core::arch::asm!("wfi");
+    }
+    awu_clear_pending();
+}
+
+/// Enter standby. Much lower current, but most of the chip is powered down.
+/// Call `pwr_enable`, `lsi_enable`, `awu_configure` and `awu_enable` first.
 #[inline]
 pub fn standby() {
+    awu_restart();
     unsafe {
-        write_volatile(CTLR, read_volatile(CTLR) | CTLR_PDDS);
-        write_volatile(PFIC_SCTLR, read_volatile(PFIC_SCTLR) | SCTLR_SLEEPDEEP);
+        write_volatile(PWR_CTLR, read_volatile(PWR_CTLR) | CTLR_PDDS);
+        write_volatile(
+            PFIC_SCTLR,
+            read_volatile(PFIC_SCTLR) | SCTLR_SLEEPDEEP | SCTLR_WFITOWFE,
+        );
         core::arch::asm!("wfi");
+    }
+    awu_clear_pending();
+}
+
+// ---------------------------------------------------------------- readback
+
+/// Snapshot of every register involved in the AWU wake path.
+///
+/// No `Debug` impl by design — print the fields with your own hex formatter.
+#[derive(Clone, Copy)]
+pub struct Regs {
+    pub pwr_ctlr: u32,
+    pub pwr_csr: u32,
+    pub awucsr: u32,
+    pub awuwr: u32,
+    pub awupsc: u32,
+    pub rcc_apb1pcenr: u32,
+    pub rcc_rstsckr: u32,
+    pub exti_intenr: u32,
+    pub exti_evenr: u32,
+    pub exti_rtenr: u32,
+    pub exti_ftenr: u32,
+    pub exti_intfr: u32,
+    pub pfic_sctlr: u32,
+}
+
+/// Read back the full wake path. Call immediately before sleeping.
+pub fn read_regs() -> Regs {
+    unsafe {
+        Regs {
+            pwr_ctlr: read_volatile(PWR_CTLR),
+            pwr_csr: read_volatile(PWR_CSR),
+            awucsr: read_volatile(PWR_AWUCSR),
+            awuwr: read_volatile(PWR_AWUWR),
+            awupsc: read_volatile(PWR_AWUPSC),
+            rcc_apb1pcenr: read_volatile(RCC_APB1PCENR),
+            rcc_rstsckr: read_volatile(RCC_RSTSCKR),
+            exti_intenr: read_volatile(EXTI_INTENR),
+            exti_evenr: read_volatile(EXTI_EVENR),
+            exti_rtenr: read_volatile(EXTI_RTENR),
+            exti_ftenr: read_volatile(EXTI_FTENR),
+            exti_intfr: read_volatile(EXTI_INTFR),
+            pfic_sctlr: read_volatile(PFIC_SCTLR),
+        }
     }
 }
