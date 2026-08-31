@@ -1,32 +1,73 @@
 #![no_std]
 #![no_main]
 
+use ch32_hal::adc::{Adc, SampleTime, Vref};
 use ch32_hal::debug::SDIPrint;
 use ch32_hal::exti::ExtiInput;
 use ch32_hal::gpio::{Level, Output, Pull};
 
 use embassy_executor::Spawner;
-use embassy_time::{with_timeout, Duration, Instant, TimeoutError, Timer};
+use embassy_time::{with_timeout, Duration, TimeoutError, Timer};
 
 use ch32_util::chip_info::{clear_reset, decode_reset};
 use ch32_util::iwdg::{Prescaler, Watchdog};
 use ch32_util::sdi_println;
 
-use portable_atomic::{AtomicBool, AtomicU32, Ordering};
+use portable_atomic::{AtomicBool, AtomicU32, AtomicU8, Ordering};
+
+#[repr(u8)]
+enum LedState {
+    Off = 0,
+    On = 1,
+    SlowFlash = 2,
+    FastFlash = 3,
+}
+
+impl TryFrom<u8> for LedState {
+    type Error = u8;
+
+    fn try_from(v: u8) -> Result<Self, Self::Error> {
+        match v {
+            0 => Ok(LedState::Off),
+            1 => Ok(LedState::On),
+            2 => Ok(LedState::SlowFlash),
+            3 => Ok(LedState::FastFlash),
+            other => Err(other),
+        }
+    }
+}
 
 static COUNTER: AtomicU32 = AtomicU32::new(0);
 static POWER_STATE: AtomicBool = AtomicBool::new(false);
+static LED_STATE: AtomicU8 = AtomicU8::new(0);
 
 const DEBOUNCE_MS: u64 = 20;
+const FLASH_MS: u64 = 500;
 const LONG_PRESS_MS: u64 = 2000;
+const WATCHDOG_MS: u32 = 4000;
+const VREF_MV: u32 = 1228000; // 1.2V Ref * 1024 * 1000
 
 #[embassy_executor::task]
-async fn led_task(mut led: Output<'static>, mut wdt: Watchdog, interval_ms: u64) {
+async fn led_task(mut led: Output<'static>, mut wdt: Watchdog) {
     loop {
-        led.set_high();
-        Timer::after_millis(interval_ms).await;
-        led.set_low();
-        Timer::after_millis(interval_ms).await;
+        match TryInto::<LedState>::try_into(LED_STATE.load(Ordering::Relaxed)).unwrap() {
+            LedState::Off => {
+                led.set_low();
+                Timer::after_millis(200).await;
+            }
+            LedState::On => {
+                led.set_high();
+                Timer::after_millis(200).await;
+            }
+            LedState::SlowFlash => {
+                led.toggle();
+                Timer::after_millis(500).await;
+            }
+            LedState::FastFlash => {
+                led.toggle();
+                Timer::after_millis(100).await;
+            }
+        }
         // Feed IWDG
         wdt.feed();
     }
@@ -39,20 +80,42 @@ async fn button_task(mut button: ExtiInput<'static>, mut pc817: Output<'static>)
         // Debounce
         Timer::after_millis(DEBOUNCE_MS).await;
         if button.is_low() {
-            match with_timeout(Duration::from_millis(LONG_PRESS_MS), button.wait_for_rising_edge()).await {
+            match with_timeout(
+                Duration::from_millis(FLASH_MS),
+                button.wait_for_rising_edge(),
+            )
+            .await
+            {
                 Ok(_) => {
                     sdi_println!(">> SHORT PRESS");
                     if !POWER_STATE.load(Ordering::Relaxed) {
                         pc817.set_high();
                         POWER_STATE.store(true, Ordering::Relaxed);
+                        LED_STATE.store(LedState::On as u8, Ordering::Relaxed);
                     }
-                    COUNTER.store(0, Ordering::Relaxed);
                 }
                 Err(TimeoutError) => {
-                    sdi_println!(">> LONG PRESS");
-                    if POWER_STATE.load(Ordering::Relaxed) {
-                        pc817.set_low();
-                        POWER_STATE.store(false, Ordering::Relaxed);
+                    sdi_println!(">> FLASH");
+                    let prev = LED_STATE.swap(LedState::FastFlash as u8, Ordering::Relaxed);
+                    match with_timeout(
+                        Duration::from_millis(LONG_PRESS_MS),
+                        button.wait_for_rising_edge(),
+                    )
+                    .await
+                    {
+                        Ok(_) => {
+                            LED_STATE.store(prev, Ordering::Relaxed);
+                        }
+                        Err(TimeoutError) => {
+                            sdi_println!(">> LONG PRESS");
+                            if POWER_STATE.load(Ordering::Relaxed) {
+                                pc817.set_low();
+                                POWER_STATE.store(false, Ordering::Relaxed);
+                                LED_STATE.store(LedState::Off as u8, Ordering::Relaxed);
+                            } else {
+                                LED_STATE.store(prev, Ordering::Relaxed);
+                            }
+                        }
                     }
                 }
             }
@@ -75,7 +138,11 @@ async fn main(spawner: Spawner) -> ! {
     decode_reset(ch32_hal::pac::RCC.rstsckr().read().0);
     clear_reset();
 
-    let wdt = match Watchdog::start(Prescaler::Div256, 4000) {
+    let mut adc = Adc::new(p.ADC1, Default::default());
+    let vref = adc.convert(&mut Vref, SampleTime::CYCLES73);
+    sdi_println!(">> ADC Vref: {} -> Vdd: {}mV", vref, VREF_MV / vref as u32);
+
+    let wdt = match Watchdog::start(Prescaler::Div256, WATCHDOG_MS) {
         Ok(w) => w,
         Err(_) => panic!("bad watchdog period"),
     };
@@ -85,9 +152,9 @@ async fn main(spawner: Spawner) -> ! {
     let pc817 = p.PC4;
 
     // LED Task
-    sdi_println!("Start led_task");
+    sdi_println!(">> Start led_task");
     let led = Output::new(led, Level::Low, Default::default());
-    match led_task(led, wdt, 500) {
+    match led_task(led, wdt) {
         Ok(t) => spawner.spawn(t),
         Err(_) => panic!("Error spawning led_task"),
     }
@@ -95,12 +162,11 @@ async fn main(spawner: Spawner) -> ! {
     let button = ExtiInput::new(button, p.EXTI2, Pull::Up);
     let pc817 = Output::new(pc817, Level::Low, Default::default());
 
-    sdi_println!("Start button_task");
+    sdi_println!(">> Start button_task");
     match button_task(button, pc817) {
         Ok(t) => spawner.spawn(t),
         Err(_) => panic!("Error spawning button_task"),
     }
-
 
     loop {
         sdi_println!(">> COUNTER: {}", COUNTER.fetch_add(1, Ordering::Relaxed));

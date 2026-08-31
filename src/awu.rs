@@ -275,16 +275,37 @@ pub fn sleep() {
 
 /// Enter standby. Much lower current, but most of the chip is powered down.
 /// Call `pwr_enable`, `lsi_enable`, `awu_configure` and `awu_enable` first.
+const SCTLR_SEVONPEND: u32 = 1 << 4;
+const SCTLR_SETEVENT: u32 = 1 << 5;
+/// Interrupt pending reset register, write 1 to clear. TIM2 is IRQ 38 -> word 1, bit 6.
+const PFIC_IPRR0: *mut u32 = 0xE000_E280 as *mut u32;
+
 #[inline]
 pub fn standby() {
     awu_restart();
     unsafe {
         write_volatile(PWR_CTLR, read_volatile(PWR_CTLR) | CTLR_PDDS);
+
+        let saved = read_volatile(PFIC_SCTLR);
         write_volatile(
             PFIC_SCTLR,
-            read_volatile(PFIC_SCTLR) | SCTLR_SLEEPDEEP | SCTLR_WFITOWFE,
+            (saved | SCTLR_SLEEPDEEP | SCTLR_WFITOWFE) & !SCTLR_SEVONPEND,
         );
-        core::arch::asm!("wfi");
+
+        // Drop a pending TIM2 so an enabled+pending irq can't wake the second wfe.
+        write_volatile(PFIC_IPRR0.add(1), 1 << (38 - 32));
+
+        // qingke-rt leaves WFITOWFE set, so `wfi` runs as `wfe` and consumes a
+        // latched event rather than sleeping. ch32-hal's init() sets SEVONPEND,
+        // and the ~1 Hz TIM2 time driver latches an event long before we get
+        // here; clearing SEVONPEND above does not un-latch it. So: force the
+        // latch set, burn it on the first wfe, sleep on the second.
+        write_volatile(PFIC_SCTLR, read_volatile(PFIC_SCTLR) | SCTLR_SETEVENT);
+        core::arch::asm!("wfi"); // returns immediately, clears the latch
+        core::arch::asm!("wfi"); // actually enters standby
+
+        write_volatile(PFIC_SCTLR, saved);
+        write_volatile(PWR_CTLR, read_volatile(PWR_CTLR) & !CTLR_PDDS);
     }
     awu_clear_pending();
 }

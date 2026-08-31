@@ -20,7 +20,7 @@ async fn main(_spawner: Spawner) -> ! {
     ch32_util::sdi_write::sdi_write(b">> INIT\n");
 
     // Delay to allow programming after reboot
-    Timer::after_millis(2000).await;
+    Timer::after_millis(1000).await;
 
     decode_reset(ch32_hal::pac::RCC.rstsckr().read().0);
     clear_reset();
@@ -46,9 +46,9 @@ async fn main(_spawner: Spawner) -> ! {
 async fn flash(led: &mut Output<'_>, count: u64) {
     for _ in 0..count {
         led.set_high();
-        Timer::after_millis(250).await;
+        Timer::after_millis(100).await;
         led.set_low();
-        Timer::after_millis(250).await;
+        Timer::after_millis(100).await;
     }
 }
 

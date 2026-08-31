@@ -12,15 +12,20 @@ impl uWrite for Sdi {
     }
 }
 
-type BlockingUartTx =
-    ch32_hal::usart::UartTx<'static, ch32_hal::peripherals::USART1, ch32_hal::mode::Blocking>;
-
-pub struct UartFmt {
-    uart_tx: BlockingUartTx,
+pub struct UartFmt<M>
+where
+    M: ch32_hal::mode::Mode,
+{
+    uart_tx: ch32_hal::usart::UartTx<'static, ch32_hal::peripherals::USART1, M>,
 }
 
-impl UartFmt {
-    pub fn new(uart_tx: BlockingUartTx) -> Self {
+impl<M> UartFmt<M>
+where
+    M: ch32_hal::mode::Mode,
+{
+    pub fn new(
+        uart_tx: ch32_hal::usart::UartTx<'static, ch32_hal::peripherals::USART1, M>,
+    ) -> Self {
         Self { uart_tx }
     }
     pub fn write(&mut self, buffer: &[u8]) -> Result<(), ch32_hal::usart::Error> {
@@ -31,7 +36,10 @@ impl UartFmt {
     }
 }
 
-impl uWrite for UartFmt {
+impl<M> uWrite for UartFmt<M>
+where
+    M: ch32_hal::mode::Mode,
+{
     type Error = ch32_hal::usart::Error;
 
     // Translate '\n' into '\r\n' for serial output
