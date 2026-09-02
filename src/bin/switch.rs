@@ -147,9 +147,14 @@ async fn main(spawner: Spawner) -> ! {
         Err(_) => panic!("bad watchdog period"),
     };
 
+    // SOC-8
     let led = p.PA1;
     let button = p.PA2;
-    let pc817 = p.PC4;
+    let enable = p.PC4;
+    // SOC-16
+    // let led = p.PC0;
+    // let button = p.PC4;
+    // let enable = p.PC3;
 
     // LED Task
     sdi_println!(">> Start led_task");
@@ -160,10 +165,10 @@ async fn main(spawner: Spawner) -> ! {
     }
 
     let button = ExtiInput::new(button, p.EXTI2, Pull::Up);
-    let pc817 = Output::new(pc817, Level::Low, Default::default());
+    let enable = Output::new(enable, Level::Low, Default::default());
 
     sdi_println!(">> Start button_task");
-    match button_task(button, pc817) {
+    match button_task(button, enable) {
         Ok(t) => spawner.spawn(t),
         Err(_) => panic!("Error spawning button_task"),
     }
