@@ -3,7 +3,11 @@ use ch32_hal::usart;
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::pipe::Pipe;
 
-pub static TX_PIPE: Pipe<CriticalSectionRawMutex, 64> = Pipe::new();
+use portable_atomic::{AtomicBool, Ordering};
+
+pub static TX_PIPE: Pipe<CriticalSectionRawMutex, 128> = Pipe::new();
+pub static ECHO: AtomicBool = AtomicBool::new(false);
+pub static UCASE: AtomicBool = AtomicBool::new(false);
 
 pub struct TxSink;
 
@@ -40,6 +44,11 @@ macro_rules! serial_println {
     ($($arg:tt)*) => {{ let _ = ::ufmt::uwriteln!(&mut $crate::serial::TxSink, $($arg)*); }};
 }
 
+#[macro_export]
+macro_rules! serial_print {
+    ($($arg:tt)*) => {{ let _ = ::ufmt::uwrite!(&mut $crate::serial::TxSink, $($arg)*); }};
+}
+
 type CmdFn = fn(&str);
 
 #[embassy_executor::task]
@@ -48,23 +57,58 @@ pub async fn serial_read(
     handler: CmdFn,
 ) {
     serial_println!("-- [[ CH32V003 ]] --");
-    let mut buf = [0u8; 16];
+    let mut buf = [0u8; 64];
     let mut line_buf = heapless::String::<64>::new();
+    let mut crlf = false;
     loop {
+        let echo = ECHO.load(Ordering::Relaxed);
         match rx.read_until_idle(&mut buf).await {
             Ok(n) => {
                 for &b in &buf[..n] {
                     match b {
                         b'\n' | b'\r' => {
-                            handler(&line_buf);
+                            if !crlf {
+                                if echo {
+                                    serial_print!("\r\n");
+                                }
+                                handler(&line_buf);
+                                line_buf.clear();
+                                crlf = true;
+                                if echo {
+                                    serial_print!("## ");
+                                }
+                            }
+                        }
+                        0x1b => {
+                            // ESC
                             line_buf.clear();
+                            if echo {
+                                serial_print!("\r\n## ");
+                            }
                         }
                         0x20..=0x7e => {
+                            // ASCII
+                            // Convert to uppercase
+                            let b = if UCASE.load(Ordering::Relaxed) && b >= b'a' && b <= b'z' {
+                                b - 0x20
+                            } else {
+                                b
+                            };
+                            if echo {
+                                serial_print!("{}", b as char);
+                            }
                             if line_buf.push(b as char).is_err() {
+                                if echo {
+                                    serial_print!("\r\n");
+                                }
                                 handler(&line_buf);
                                 line_buf.clear();
                                 let _ = line_buf.push(b as char);
+                                if echo {
+                                    serial_print!("## {}", b as char);
+                                }
                             }
+                            crlf = false;
                         }
                         _ => {} // ignore control/non-ASCII
                     }

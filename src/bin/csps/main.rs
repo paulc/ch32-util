@@ -24,7 +24,6 @@ mod serial;
 static COUNTER: AtomicU32 = AtomicU32::new(0);
 static POWER_STATE: AtomicBool = AtomicBool::new(false);
 static LED_STATE: AtomicU8 = AtomicU8::new(0);
-static SERIAL_CHARS: AtomicU32 = AtomicU32::new(0);
 
 const WATCHDOG_MS: u32 = 4000;
 const VREF_MV: u32 = 1228000; // 1.2V Ref * 1024 * 1000
@@ -36,15 +35,31 @@ ch32_hal::bind_interrupts!(struct Irqs {
 fn serial_handler(line: &str) {
     let line = line.trim_ascii();
     if !line.is_empty() {
-        SERIAL_CHARS.fetch_add(line.len() as u32, Ordering::Relaxed);
-        /*
         let mut it = line.split_ascii_whitespace();
         match it.next() {
-            Some("hello") => serial_println!("-- Hello >>{}<<", it.next().unwrap_or("There")),
-            Some(cmd) => serial_println!("-- CMD: {}", cmd),
+            Some("STATUS") => {
+                serial_println!(">> COUNTER: {}", COUNTER.load(Ordering::Relaxed));
+                serial_println!(">> POWER_STATE: {}", POWER_STATE.load(Ordering::Relaxed));
+                serial_println!(">> LED_STATE: {}", LED_STATE.load(Ordering::Relaxed));
+            }
+            Some("ECHO") => {
+                match it.next() {
+                    Some("ON") => serial::ECHO.store(true, Ordering::Relaxed),
+                    Some("OFF") => serial::ECHO.store(false, Ordering::Relaxed),
+                    _ => {}
+                }
+                serial_println!(
+                    ">> ECHO {}",
+                    if serial::ECHO.load(Ordering::Relaxed) {
+                        "ON"
+                    } else {
+                        "OFF"
+                    }
+                );
+            }
+            Some(s) => serial_println!("!! ERROR: <{}> [{}]", s, s.len()),
             None => {}
         }
-        */
     }
 }
 
@@ -96,6 +111,8 @@ async fn main(spawner: Spawner) -> ! {
         }
     };
 
+    serial::UCASE.store(true, Ordering::Relaxed);
+
     // Spawn serial reader/writer tasks
     spawner.spawn(serial::serial_read(uart_rx, serial_handler).unwrap());
     spawner.spawn(serial::serial_write(uart_tx).unwrap());
@@ -119,7 +136,6 @@ async fn main(spawner: Spawner) -> ! {
 
     loop {
         sdi_println!(">> COUNTER: {}", COUNTER.fetch_add(1, Ordering::Relaxed));
-        sdi_println!(">> SERIAL_CHARS: {}", SERIAL_CHARS.load(Ordering::Relaxed));
         Timer::after_millis(1000).await;
     }
 }
