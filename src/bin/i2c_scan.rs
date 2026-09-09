@@ -6,7 +6,6 @@ use ch32_util::sdi_println;
 use ch32_hal as hal;
 use hal::debug::SDIPrint;
 use hal::delay::Delay;
-use hal::gpio::{Input, Level, Output, Pull};
 use hal::i2c::I2c;
 use hal::time::Hertz;
 
@@ -29,40 +28,21 @@ fn main() -> ! {
 
     ch32_util::chip_info::chip_info();
 
-    let mut led = Output::new(p.PC3, Level::Low, Default::default());
-    let button = Input::new(p.PC0, Pull::Down);
-
-    let scl = p.PC2;
     let sda = p.PC1;
+    let scl = p.PC2;
 
     let mut i2c = I2c::new_blocking(p.I2C1, scl, sda, Hertz::hz(100_000), Default::default());
 
-    sdi_println!("Scan I2C bus: START");
-    for addr in 1..=127 {
-        if i2c.blocking_write(addr, &[0]).is_ok() {
-            sdi_println!(">> Found I2C device at address: 0x{:02x}", addr);
-        }
-    }
-    sdi_println!("Scan I2C bus: DONE");
-
-    for _ in 0..10 {
-        led.toggle();
-        delay.delay_ms(50);
-    }
-
-    let mut n = 0_u32;
     loop {
-        led.toggle();
-
-        let tick = hal::pac::SYSTICK.cnt().read();
-        sdi_println!(">> TICK: {} [{}]", n, tick);
-
-        if button.is_high() {
-            sdi_println!(">> BUTTON HIGH");
+        sdi_println!("Scan I2C bus: START");
+        for addr in 1..=127 {
+            let mut buf = [0u8; 1];
+            if i2c.blocking_read(addr, &mut buf).is_ok() {
+                sdi_println!(">> Found I2C device at address: 0x{:02x}", addr);
+            }
         }
-
-        delay.delay_ms(250);
-        n += 1;
+        sdi_println!("Scan I2C bus: DONE");
+        delay.delay_ms(2000);
     }
 }
 
