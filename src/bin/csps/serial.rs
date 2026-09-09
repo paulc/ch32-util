@@ -1,11 +1,13 @@
 use ch32_hal::usart;
 
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
+use embassy_sync::channel::Channel;
 use embassy_sync::pipe::Pipe;
 
 use portable_atomic::{AtomicBool, Ordering};
 
-pub static TX_PIPE: Pipe<CriticalSectionRawMutex, 128> = Pipe::new();
+pub static TX_PIPE: Pipe<CriticalSectionRawMutex, 256> = Pipe::new();
+pub static LINE_CHANNEL: Channel<CriticalSectionRawMutex, heapless::String<64>, 1> = Channel::new();
 pub static ECHO: AtomicBool = AtomicBool::new(false);
 pub static UCASE: AtomicBool = AtomicBool::new(false);
 
@@ -49,40 +51,34 @@ macro_rules! serial_print {
     ($($arg:tt)*) => {{ let _ = ::ufmt::uwrite!(&mut $crate::serial::TxSink, $($arg)*); }};
 }
 
-type CmdFn = fn(&str);
-
 #[embassy_executor::task]
 pub async fn serial_read(
     mut rx: usart::UartRx<'static, ch32_hal::peripherals::USART1, ch32_hal::mode::Async>,
-    handler: CmdFn,
 ) {
     serial_println!("-- [[ CH32V003 ]] --");
     let mut buf = [0u8; 64];
     let mut line_buf = heapless::String::<64>::new();
     let mut crlf = false;
     loop {
-        let echo = ECHO.load(Ordering::Relaxed);
         match rx.read_until_idle(&mut buf).await {
             Ok(n) => {
                 for &b in &buf[..n] {
                     match b {
                         b'\n' | b'\r' => {
                             if !crlf {
-                                if echo {
+                                if ECHO.load(Ordering::Relaxed) {
                                     serial_print!("\r\n");
                                 }
-                                handler(&line_buf);
+                                // Send to LINE_CHANNEL - drop if channel full
+                                let _ = LINE_CHANNEL.try_send(line_buf.clone());
                                 line_buf.clear();
                                 crlf = true;
-                                if echo {
-                                    serial_print!("## ");
-                                }
                             }
                         }
                         0x1b => {
                             // ESC
                             line_buf.clear();
-                            if echo {
+                            if ECHO.load(Ordering::Relaxed) {
                                 serial_print!("\r\n## ");
                             }
                         }
@@ -94,18 +90,14 @@ pub async fn serial_read(
                             } else {
                                 b
                             };
-                            if echo {
+                            if ECHO.load(Ordering::Relaxed) {
                                 serial_print!("{}", b as char);
                             }
                             if line_buf.push(b as char).is_err() {
-                                if echo {
-                                    serial_print!("\r\n");
-                                }
-                                handler(&line_buf);
+                                // Drop line if exceeds line_buf
                                 line_buf.clear();
-                                let _ = line_buf.push(b as char);
-                                if echo {
-                                    serial_print!("## {}", b as char);
+                                if ECHO.load(Ordering::Relaxed) {
+                                    serial_print!("\r\n!! ERROR: LINE TOO LONG\r\n## ");
                                 }
                             }
                             crlf = false;
