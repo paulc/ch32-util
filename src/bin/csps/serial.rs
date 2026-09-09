@@ -6,7 +6,7 @@ use embassy_sync::pipe::Pipe;
 
 use portable_atomic::{AtomicBool, Ordering};
 
-pub static TX_PIPE: Pipe<CriticalSectionRawMutex, 256> = Pipe::new();
+pub static TX_PIPE: Pipe<CriticalSectionRawMutex, 128> = Pipe::new();
 pub static LINE_CHANNEL: Channel<CriticalSectionRawMutex, heapless::String<64>, 1> = Channel::new();
 pub static ECHO: AtomicBool = AtomicBool::new(false);
 pub static UCASE: AtomicBool = AtomicBool::new(false);

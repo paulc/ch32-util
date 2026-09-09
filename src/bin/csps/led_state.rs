@@ -4,18 +4,17 @@ pub enum LedState {
     On = 1,
     SlowFlash = 2,
     FastFlash = 3,
+    Unknown = 4,
 }
 
-impl TryFrom<u8> for LedState {
-    type Error = u8;
-
-    fn try_from(v: u8) -> Result<Self, Self::Error> {
+impl From<u8> for LedState {
+    fn from(v: u8) -> Self {
         match v {
-            0 => Ok(LedState::Off),
-            1 => Ok(LedState::On),
-            2 => Ok(LedState::SlowFlash),
-            3 => Ok(LedState::FastFlash),
-            other => Err(other),
+            0 => LedState::Off,
+            1 => LedState::On,
+            2 => LedState::SlowFlash,
+            3 => LedState::FastFlash,
+            _ => LedState::Unknown,
         }
     }
 }

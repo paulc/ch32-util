@@ -58,6 +58,8 @@ pub trait FormatHex {
 
 impl FormatHex for u32 {
     type Output = [u8; 10];
+
+    #[inline(never)]
     fn fmt_hex(self) -> [u8; 10] {
         let bytes = self.to_be_bytes();
         [
@@ -72,5 +74,31 @@ impl FormatHex for u32 {
             HEX[(bytes[3] >> 4) as usize],
             HEX[(bytes[3] & 0xF) as usize],
         ]
+    }
+}
+
+pub trait FormatDec {
+    type Output: AsRef<[u8]>;
+    fn fmt_dec(self) -> Self::Output;
+}
+
+impl FormatDec for u32 {
+    // u32::MAX = 4_294_967_295 (10 digits)
+    type Output = [u8; 10];
+
+    #[inline(never)]
+    fn fmt_dec(self) -> [u8; 10] {
+        let mut buf = [b'0'; 10]; // start with all zeros (padding)
+        let mut n = self;
+        let mut idx = 10;
+
+        // Fill digits from right to left
+        while n > 0 && idx > 0 {
+            idx -= 1;
+            buf[idx] = b'0' + (n % 10) as u8;
+            n /= 10;
+        }
+        // If n == 0, buf remains all '0's (as in "0000000000")
+        buf
     }
 }

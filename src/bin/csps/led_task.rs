@@ -11,7 +11,7 @@ use crate::LED_STATE;
 #[embassy_executor::task]
 pub async fn led_task(mut led: Output<'static>, mut wdt: Watchdog) {
     loop {
-        match TryInto::<LedState>::try_into(LED_STATE.load(Ordering::Relaxed)).unwrap() {
+        match Into::<LedState>::into(LED_STATE.load(Ordering::Relaxed)) {
             LedState::Off => {
                 led.set_low();
                 Timer::after_millis(200).await;
@@ -28,6 +28,7 @@ pub async fn led_task(mut led: Output<'static>, mut wdt: Watchdog) {
                 led.toggle();
                 Timer::after_millis(100).await;
             }
+            _ => {}
         }
         // Feed IWDG
         wdt.feed();

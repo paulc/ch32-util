@@ -1,3 +1,5 @@
+cargo-features = ["panic-immediate-abort"]
+
 [package]
 name = "ch32-util"
 version = "0.1.0"
@@ -8,8 +10,9 @@ path = "src/lib.rs"
 harness = false
 
 [features]
-default = ["debug","ch32v003f4u6","embassy-executor/platform-spin"]
+default = ["debug","ch32v003f4u6","platform-spin"]
 debug = []
+platform-spin = ["embassy-executor/platform-spin"]
 platform-riscv32 = ["embassy-executor/platform-riscv32"]
 # TSSOP-20
 ch32v003f4u6 = ["ch32-hal/ch32v003f4u6", "ch32-metapac/ch32v003f4u6"]
@@ -54,10 +57,10 @@ static_cell = "2.1.1"
 critical-section = "1.2.0"
 
 [profile.release]
-opt-level = "z"        # try "s" too — sometimes wins
+panic = "immediate-abort"
+opt-level = "z"
 lto = "fat"
 codegen-units = 1
-panic = "abort"
 debug = 2              # free: DWARF isn't ALLOC, never reaches flash
 overflow-checks = false
 debug-assertions = false
