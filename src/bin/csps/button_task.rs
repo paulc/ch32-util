@@ -15,7 +15,6 @@ const DEBOUNCE_MS: u64 = 20;
 const FLASH_MS: u64 = 500;
 const LONG_PRESS_MS: u64 = 2000;
 
-#[embassy_executor::task]
 pub async fn button_task(mut button: ExtiInput<'static>, mut pc817: Output<'static>) {
     loop {
         button.wait_for_falling_edge().await;

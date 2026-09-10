@@ -13,6 +13,7 @@ use ch32_hal::usart;
 use ch32_hal::debug::SDIPrint;
 
 use embassy_executor::Spawner;
+use embassy_futures::join::join;
 
 use ch32_util::chip_info::clear_reset;
 #[cfg(feature = "debug")]
@@ -113,11 +114,11 @@ async fn main(spawner: Spawner) -> ! {
     serial::UCASE.store(true, Ordering::Relaxed);
 
     // Spawn serial reader/writer tasks
-    match serial::serial_read(uart_rx) {
+    match serial::serial_read_task(uart_rx) {
         Ok(t) => spawner.spawn(t),
         Err(_) => panic!("serial_read"),
     }
-    match serial::serial_write(uart_tx) {
+    match serial::serial_write_task(uart_tx) {
         Ok(t) => spawner.spawn(t),
         Err(_) => panic!("serial_write"),
     }
@@ -126,20 +127,16 @@ async fn main(spawner: Spawner) -> ! {
         Err(_) => panic!("line_handler"),
     }
 
-    // LED Task
+    // LED + Button Task
     let led = Output::new(board_led, Level::Low, Default::default());
-    match led_task::led_task(led, wdt) {
-        Ok(t) => spawner.spawn(t),
-        Err(_) => panic!("led_task"),
-    }
-
     let button = ExtiInput::new(switch, p.EXTI4, Pull::Up);
     let enable = Output::new(enable, Level::Low, Default::default());
 
-    match button_task::button_task(button, enable) {
-        Ok(t) => spawner.spawn(t),
-        Err(_) => panic!("button_task"),
-    }
+    let _ = join(
+        button_task::button_task(button, enable),
+        led_task::led_task(led, wdt),
+    )
+    .await;
 
     loop {
         let _ = core::future::pending::<()>().await;

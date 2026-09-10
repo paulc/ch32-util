@@ -1,5 +1,6 @@
 /// Parses a `&str` as `u32`. A leading "0x" selects hex, otherwise decimal.
 /// Saturates at `u32::MAX` on overflow.
+#[inline(never)]
 pub fn parse_u32(s: &str) -> u32 {
     let (s, radix) = match s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")) {
         Some(rest) => (rest, 16u32),
@@ -21,6 +22,7 @@ pub fn parse_u32(s: &str) -> u32 {
 
 /// Parses a hex string (no "0x" prefix) into a fixed 16-byte array + length:
 /// Returns None on: > 32 hex chars, odd length, or non-hex character.
+#[inline(never)]
 pub fn parse_hex(s: &str) -> Option<([u8; 16], usize)> {
     let b = s.as_bytes();
     if b.len() > 32 || b.len() % 2 != 0 {

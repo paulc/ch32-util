@@ -55,6 +55,7 @@ ufmt = { version = "0.2.0" }
 heapless = { version = "0.9.3", features = ["ufmt"] }
 static_cell = "2.1.1"
 critical-section = "1.2.0"
+embassy-futures = "0.1.2"
 
 [profile.release]
 panic = "immediate-abort"

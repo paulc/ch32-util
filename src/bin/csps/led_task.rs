@@ -8,29 +8,28 @@ use ch32_util::iwdg::Watchdog;
 use crate::led_state::LedState;
 use crate::LED_STATE;
 
-#[embassy_executor::task]
-pub async fn led_task(mut led: Output<'static>, mut wdt: Watchdog) {
+pub async fn led_task(mut led: Output<'static>, mut wdt: Watchdog) -> ! {
     loop {
-        match Into::<LedState>::into(LED_STATE.load(Ordering::Relaxed)) {
+        let ms = match LedState::from(LED_STATE.load(Ordering::Relaxed)) {
             LedState::Off => {
                 led.set_low();
-                Timer::after_millis(200).await;
+                200
             }
             LedState::On => {
                 led.set_high();
-                Timer::after_millis(200).await;
+                200
             }
             LedState::SlowFlash => {
                 led.toggle();
-                Timer::after_millis(500).await;
+                500
             }
             LedState::FastFlash => {
                 led.toggle();
-                Timer::after_millis(100).await;
+                100
             }
-            _ => {}
-        }
-        // Feed IWDG
+            LedState::Unknown => 200,
+        };
         wdt.feed();
+        Timer::after_millis(ms).await;
     }
 }
