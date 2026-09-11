@@ -20,11 +20,6 @@ fn lookup(s: &str, table: &[&str]) -> Option<usize> {
 
 #[embassy_executor::task]
 pub async fn line_handler(mut i2c: I2c<'static, I2C1, Blocking>) {
-    #[cfg(feature = "debug")]
-    {
-        ch32_util::stack_info::paint_stack();
-        ch32_util::stack_info::print_stack_info(b"LINE_HANDLER");
-    }
     loop {
         let line = LINE_CHANNEL.receive().await;
         let line = line.trim_ascii();

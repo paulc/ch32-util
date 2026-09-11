@@ -3,9 +3,6 @@ use ch32_hal::gpio::Output;
 
 use embassy_time::{with_timeout, Duration, TimeoutError, Timer};
 
-#[cfg(feature = "debug")]
-use ch32_util::sdi_write::sdi_write;
-
 use portable_atomic::Ordering;
 
 use crate::led_state::LedState;
@@ -28,8 +25,6 @@ pub async fn button_task(mut button: ExtiInput<'static>, mut pc817: Output<'stat
             .await
             {
                 Ok(_) => {
-                    #[cfg(feature = "debug")]
-                    sdi_write(b">> SHORT PRESS");
                     if !POWER_STATE.load(Ordering::Relaxed) {
                         pc817.set_high();
                         POWER_STATE.store(true, Ordering::Relaxed);
@@ -37,8 +32,6 @@ pub async fn button_task(mut button: ExtiInput<'static>, mut pc817: Output<'stat
                     }
                 }
                 Err(TimeoutError) => {
-                    #[cfg(feature = "debug")]
-                    sdi_write(b">> FLASH");
                     let prev = LED_STATE.swap(LedState::FastFlash as u8, Ordering::Relaxed);
                     match with_timeout(
                         Duration::from_millis(LONG_PRESS_MS),
@@ -50,8 +43,6 @@ pub async fn button_task(mut button: ExtiInput<'static>, mut pc817: Output<'stat
                             LED_STATE.store(prev, Ordering::Relaxed);
                         }
                         Err(TimeoutError) => {
-                            #[cfg(feature = "debug")]
-                            sdi_write(b">> LONG PRESS");
                             if POWER_STATE.load(Ordering::Relaxed) {
                                 pc817.set_low();
                                 POWER_STATE.store(false, Ordering::Relaxed);

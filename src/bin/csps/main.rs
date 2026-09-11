@@ -1,7 +1,6 @@
 #![no_std]
 #![no_main]
 
-#[cfg(feature = "debug")]
 use ch32_hal::adc::{Adc, SampleTime, Vref};
 use ch32_hal::exti::ExtiInput;
 use ch32_hal::gpio::{Input, Level, Output, Pull};
@@ -9,23 +8,17 @@ use ch32_hal::i2c::I2c;
 use ch32_hal::time::Hertz;
 use ch32_hal::usart;
 
-#[cfg(feature = "debug")]
-use ch32_hal::debug::SDIPrint;
-
 use embassy_executor::Spawner;
-use embassy_futures::join::join3;
+use embassy_futures::join::join;
 use embassy_time::Timer;
 
 use ch32_util::chip_info::clear_reset;
-#[cfg(feature = "debug")]
-use ch32_util::chip_info::decode_reset;
 use ch32_util::iwdg::{Prescaler, Watchdog};
 
 use portable_atomic::{AtomicBool, AtomicU16, AtomicU8, Ordering};
 
 mod button_task;
 mod led_state;
-mod led_task;
 mod line_handler;
 mod parse;
 mod serial;
@@ -46,25 +39,13 @@ ch32_hal::bind_interrupts!(struct Irqs {
 
 #[embassy_executor::main(entry = "qingke_rt::entry")]
 async fn main(spawner: Spawner) -> ! {
-    #[cfg(feature = "debug")]
-    SDIPrint::enable();
-
-    #[cfg(feature = "debug")]
-    {
-        ch32_util::stack_info::paint_stack();
-        ch32_util::stack_info::print_stack_info(b"INIT");
-    }
-
     let mut config = ch32_hal::Config::default();
     config.rcc = ch32_hal::rcc::Config::SYSCLK_FREQ_48MHZ_HSI;
     let p = ch32_hal::init(config);
 
-    #[cfg(feature = "debug")]
-    decode_reset(ch32_hal::pac::RCC.rstsckr().read().0);
-
     clear_reset();
 
-    let wdt = match Watchdog::start(Prescaler::Div256, WATCHDOG_MS) {
+    let mut wdt = match Watchdog::start(Prescaler::Div256, WATCHDOG_MS) {
         Ok(w) => w,
         Err(_) => panic!("watchdog"),
     };
@@ -119,7 +100,7 @@ async fn main(spawner: Spawner) -> ! {
     }
 
     // LED + Button Task
-    let board_led = Output::new(board_led, Level::Low, Default::default());
+    let mut board_led = Output::new(board_led, Level::Low, Default::default());
     let button = ExtiInput::new(switch, p.EXTI4, Pull::Up);
     let enable = Output::new(enable, Level::Low, Default::default());
 
@@ -130,6 +111,7 @@ async fn main(spawner: Spawner) -> ! {
     let mut adc = Adc::new(p.ADC1, Default::default());
 
     let status_task = async {
+        let mut count = 0_u8;
         loop {
             PS_OK.store(ps_ok.is_high(), Ordering::Relaxed);
             PS_ALARM.store(ps_alarm.is_high(), Ordering::Relaxed);
@@ -141,16 +123,28 @@ async fn main(spawner: Spawner) -> ! {
                 adc.convert(&mut imon, SampleTime::CYCLES73),
                 Ordering::Relaxed,
             );
-            Timer::after_millis(200).await;
+            match led_state::LedState::from(LED_STATE.load(Ordering::Relaxed)) {
+                led_state::LedState::Off => board_led.set_low(),
+                led_state::LedState::On => board_led.set_high(),
+                led_state::LedState::SlowFlash => {
+                    if count.is_multiple_of(5) {
+                        board_led.toggle()
+                    }
+                }
+                led_state::LedState::FastFlash => {
+                    if count.is_multiple_of(2) {
+                        board_led.toggle()
+                    }
+                }
+                _ => {}
+            }
+            count = count.wrapping_add(1);
+            wdt.feed();
+            Timer::after_millis(100).await;
         }
     };
 
-    let _ = join3(
-        status_task,
-        button_task::button_task(button, enable),
-        led_task::led_task(board_led, wdt),
-    )
-    .await;
+    let _ = join(status_task, button_task::button_task(button, enable)).await;
 
     loop {
         let _ = core::future::pending::<()>().await;
