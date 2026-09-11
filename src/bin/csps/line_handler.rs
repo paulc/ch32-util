@@ -2,16 +2,17 @@ use ch32_hal::i2c::I2c;
 use ch32_hal::mode::Blocking;
 use ch32_hal::peripherals::I2C1;
 
+use embassy_time::Instant;
 use portable_atomic::Ordering;
 
 use crate::parse::{parse_hex, parse_u32};
 use crate::serial::{serial_write, serial_write_hex, ECHO, LINE_CHANNEL};
 use crate::serial_fmt;
-use crate::{IMON, LED_STATE, POWER_STATE, PS_ALARM, PS_OK, VREF};
+use crate::{IMON, LED_STATE, OFF_TIMER, ON_TIMER, POWER_STATE, PS_ALARM, PS_OK, UPTIME, VREF};
 
-const CMDS: &[&str] = &["STATUS", "I2C", "ECHO"];
+const CMDS: &[&str] = &["STATUS", "I2C", "ECHO", "POWER", "CANCEL"];
 const CMDS_I2C: &[&str] = &["SCAN", "READ", "WRITE", "READ-REG"];
-const CMDS_ECHO: &[&str] = &["ON", "OFF"];
+const CMDS_ON_OFF: &[&str] = &["ON", "OFF"];
 
 #[inline(never)]
 fn lookup(s: &str, table: &[&str]) -> Option<usize> {
@@ -29,7 +30,13 @@ pub async fn line_handler(mut i2c: I2c<'static, I2C1, Blocking>) {
                 Some(0) => {
                     // STATUS
                     serial_fmt!(
-                        b">> POWER_STATE: ",
+                        b">> UPTIME_MS: ",
+                        U64(UPTIME.load(Ordering::Relaxed)),
+                        b"\r\n>> ON_TIMER: ",
+                        U64(ON_TIMER.load(Ordering::Relaxed)),
+                        b"\r\n>> OFF_TIMER: ",
+                        U64(OFF_TIMER.load(Ordering::Relaxed)),
+                        b"\r\n>> POWER_STATE: ",
                         BOOL(POWER_STATE.load(Ordering::Relaxed)),
                         b"\r\n>> LED STATE: ",
                         U32(LED_STATE.load(Ordering::Relaxed) as u32),
@@ -133,7 +140,7 @@ pub async fn line_handler(mut i2c: I2c<'static, I2C1, Blocking>) {
                 }
                 Some(2) => {
                     // ECHO
-                    match it.next().and_then(|s| lookup(s, CMDS_ECHO)) {
+                    match it.next().and_then(|s| lookup(s, CMDS_ON_OFF)) {
                         Some(0) => {
                             // ECHO ON
                             ECHO.store(true, Ordering::Relaxed)
@@ -150,6 +157,41 @@ pub async fn line_handler(mut i2c: I2c<'static, I2C1, Blocking>) {
                     } else {
                         b"OFF\r\n"
                     });
+                }
+                Some(3) => {
+                    // POWER
+                    match it.next().and_then(|s| lookup(s, CMDS_ON_OFF)) {
+                        Some(0) => {
+                            // POWER ON [SECS]
+                            let secs = it.next().map(parse_u32).unwrap_or(0) as u64;
+                            let on_time = Instant::now().as_millis() + (secs * 1000);
+                            ON_TIMER.store(on_time, Ordering::Relaxed);
+                            serial_fmt!(b">> POWER ON: ", U64(on_time), b"\r\n");
+                        }
+                        Some(1) => {
+                            // POWER OFF [SECS]
+                            // Minimum of 5 sec power-off timer
+                            let secs = it.next().map(parse_u32).unwrap_or(0).max(5) as u64;
+                            let off_time = Instant::now().as_millis() + (secs * 1000);
+                            OFF_TIMER.store(off_time, Ordering::Relaxed);
+                            serial_fmt!(b">> POWER OFF: ", U64(off_time), b"\r\n");
+                        }
+                        _ => serial_write(b"!! ERR-CMD\r\n"),
+                    }
+                }
+                Some(4) => {
+                    // CANCEL
+                    match it.next().and_then(|s| lookup(s, CMDS_ON_OFF)) {
+                        Some(0) => {
+                            // CANCEL ON
+                            ON_TIMER.store(0, Ordering::Relaxed);
+                        }
+                        Some(1) => {
+                            // CANCEL OFF
+                            OFF_TIMER.store(0, Ordering::Relaxed);
+                        }
+                        _ => serial_write(b"!! ERR-CMD\r\n"),
+                    }
                 }
                 Some(_) => serial_write(b"!! ERR-CMD\r\n"),
                 None => {}

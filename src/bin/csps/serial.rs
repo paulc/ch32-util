@@ -8,7 +8,7 @@ use portable_atomic::{AtomicBool, Ordering};
 
 const HEX: &[u8; 16] = b"0123456789abcdef";
 
-pub static TX_PIPE: Pipe<CriticalSectionRawMutex, 128> = Pipe::new();
+pub static TX_PIPE: Pipe<CriticalSectionRawMutex, 256> = Pipe::new();
 pub static LINE_CHANNEL: Channel<CriticalSectionRawMutex, heapless::String<64>, 1> = Channel::new();
 pub static ECHO: AtomicBool = AtomicBool::new(false);
 pub static UCASE: AtomicBool = AtomicBool::new(false);
@@ -54,6 +54,27 @@ pub fn serial_write_u32(v: u32) {
     let _ = push(&buf[zeros..]);
 }
 
+#[inline(never)]
+pub fn serial_write_u64(v: u64) {
+    let mut buf = [b'0'; 20];
+    let mut n = v;
+    let mut idx = 20;
+
+    // Fill digits from right to left
+    while n > 0 && idx > 0 {
+        idx -= 1;
+        buf[idx] = b'0' + (n % 10) as u8;
+        n /= 10;
+    }
+    let zeros = buf
+        .iter()
+        .position(|&b| b != b'0')
+        .unwrap_or(buf.len())
+        .min(19);
+
+    let _ = push(&buf[zeros..]);
+}
+
 // Helper macro for serial_write...
 #[macro_export]
 macro_rules! serial_fmt {
@@ -67,6 +88,10 @@ macro_rules! serial_fmt {
     };
     (U32($e:expr), $($rest:tt)*) => {
         $crate::serial::serial_write_u32($e);
+        $crate::serial_fmt!($($rest)*);
+    };
+    (U64($e:expr), $($rest:tt)*) => {
+        $crate::serial::serial_write_u64($e);
         $crate::serial_fmt!($($rest)*);
     };
     (HEX($e:expr), $($rest:tt)*) => {

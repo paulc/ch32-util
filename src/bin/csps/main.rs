@@ -2,29 +2,32 @@
 #![no_main]
 
 use ch32_hal::adc::{Adc, SampleTime, Vref};
-use ch32_hal::exti::ExtiInput;
 use ch32_hal::gpio::{Input, Level, Output, Pull};
 use ch32_hal::i2c::I2c;
 use ch32_hal::time::Hertz;
 use ch32_hal::usart;
 
 use embassy_executor::Spawner;
-use embassy_futures::join::join;
-use embassy_time::Timer;
+use embassy_time::{Duration, Instant, Ticker};
 
 use ch32_util::chip_info::clear_reset;
 use ch32_util::iwdg::{Prescaler, Watchdog};
 
-use portable_atomic::{AtomicBool, AtomicU16, AtomicU8, Ordering};
+use portable_atomic::{AtomicBool, AtomicU16, AtomicU64, AtomicU8, Ordering};
 
-mod button_task;
 mod led_state;
 mod line_handler;
 mod parse;
 mod serial;
 
+use led_state::LedState;
+use serial::serial_write;
+
 static POWER_STATE: AtomicBool = AtomicBool::new(false);
 static LED_STATE: AtomicU8 = AtomicU8::new(0);
+static UPTIME: AtomicU64 = AtomicU64::new(0);
+static ON_TIMER: AtomicU64 = AtomicU64::new(0);
+static OFF_TIMER: AtomicU64 = AtomicU64::new(0);
 static VREF: AtomicU16 = AtomicU16::new(0);
 static IMON: AtomicU16 = AtomicU16::new(0);
 static PS_OK: AtomicBool = AtomicBool::new(false);
@@ -99,52 +102,149 @@ async fn main(spawner: Spawner) -> ! {
         Err(_) => panic!("line_handler"),
     }
 
-    // LED + Button Task
-    let mut board_led = Output::new(board_led, Level::Low, Default::default());
-    let button = ExtiInput::new(switch, p.EXTI4, Pull::Up);
-    let enable = Output::new(enable, Level::Low, Default::default());
-
     // Status task
-    let _ext_led = Output::new(ext_led, Level::Low, Default::default());
+    let button = Input::new(switch, Pull::Up);
+    let mut enable = Output::new(enable, Level::Low, Default::default());
+    let mut board_led = Output::new(board_led, Level::Low, Default::default());
+    let mut _ext_led = Output::new(ext_led, Level::Low, Default::default());
     let ps_alarm = Input::new(ps_alarm, Pull::Down);
     let ps_ok = Input::new(ps_ok, Pull::Down);
     let mut adc = Adc::new(p.ADC1, Default::default());
 
+    const STATUS_TICKER_MS: u32 = 50;
+
     let status_task = async {
-        let mut count = 0_u8;
+        let mut count = 0_u32;
+        let mut ticker = Ticker::every(Duration::from_millis(STATUS_TICKER_MS as u64));
+        let mut button_ms = 0_u32;
+        let mut off_warning = false;
+
         loop {
+            // Get current instant
+            let now_ms = Instant::now().as_millis();
+
+            // Update status
+            UPTIME.store(now_ms, Ordering::Relaxed);
             PS_OK.store(ps_ok.is_high(), Ordering::Relaxed);
             PS_ALARM.store(ps_alarm.is_high(), Ordering::Relaxed);
             VREF.store(
-                adc.convert(&mut Vref, SampleTime::CYCLES73),
+                adc.convert(&mut Vref, SampleTime::CYCLES57),
                 Ordering::Relaxed,
             );
             IMON.store(
-                adc.convert(&mut imon, SampleTime::CYCLES73),
+                adc.convert(&mut imon, SampleTime::CYCLES57),
                 Ordering::Relaxed,
             );
-            match led_state::LedState::from(LED_STATE.load(Ordering::Relaxed)) {
-                led_state::LedState::Off => board_led.set_low(),
-                led_state::LedState::On => board_led.set_high(),
-                led_state::LedState::SlowFlash => {
-                    if count.is_multiple_of(5) {
+
+            // Check for off-warning
+            off_warning = if OFF_TIMER.load(Ordering::Relaxed) > 0
+                && now_ms >= OFF_TIMER.load(Ordering::Relaxed) - 5000
+            {
+                // Only send warning once
+                if !off_warning {
+                    serial_write(b"!! POWERING DOWN !!\r\n");
+                }
+                true
+            } else {
+                false
+            };
+
+            // Check button status
+            if button.is_low() {
+                button_ms = button_ms.saturating_add(STATUS_TICKER_MS);
+            } else {
+                button_ms = 0;
+            }
+
+            // Check for short/long press
+            match button_ms {
+                100..=500 => {
+                    // Short Press
+                    if !POWER_STATE.load(Ordering::Relaxed) {
+                        ON_TIMER.store(now_ms, Ordering::Relaxed);
+                    }
+                    // If off-warning is active cancel
+                    if off_warning {
+                        OFF_TIMER.store(0, Ordering::Relaxed);
+                    }
+                }
+                2000..=5000 => {
+                    // Long Press
+                    if POWER_STATE.load(Ordering::Relaxed) {
+                        OFF_TIMER.store(now_ms + 5000, Ordering::Relaxed);
+                    }
+                }
+                _ => {}
+            }
+
+            // Check power on timer
+            if ON_TIMER.load(Ordering::Relaxed) > 0 && now_ms >= ON_TIMER.load(Ordering::Relaxed) {
+                enable.set_high();
+                POWER_STATE.store(true, Ordering::Relaxed);
+                serial_write(b"!! POWER ON !!\r\n");
+                ON_TIMER.store(0, Ordering::Relaxed);
+            }
+
+            // Check power off timer
+            if OFF_TIMER.load(Ordering::Relaxed) > 0 && now_ms >= OFF_TIMER.load(Ordering::Relaxed)
+            {
+                enable.set_low();
+                POWER_STATE.store(false, Ordering::Relaxed);
+                serial_write(b"!! POWER OFF !!\r\n");
+                OFF_TIMER.store(0, Ordering::Relaxed);
+            }
+
+            // Check power off timer
+            if OFF_TIMER.load(Ordering::Relaxed) > 0 && now_ms >= OFF_TIMER.load(Ordering::Relaxed)
+            {
+                enable.set_low();
+                POWER_STATE.store(false, Ordering::Relaxed);
+                serial_write(b"!! POWER OFF !!\r\n");
+                OFF_TIMER.store(0, Ordering::Relaxed);
+            }
+
+            // Update LED state
+            if button_ms >= 500 && button_ms <= 2000 {
+                LED_STATE.store(LedState::FastFlash as u8, Ordering::Relaxed);
+            } else {
+                LED_STATE.store(
+                    if off_warning {
+                        LedState::SlowFlash as u8
+                    } else if POWER_STATE.load(Ordering::Relaxed) {
+                        LedState::On as u8
+                    } else {
+                        LedState::Off as u8
+                    },
+                    Ordering::Relaxed,
+                )
+            }
+
+            // Update LED
+            match LedState::from(LED_STATE.load(Ordering::Relaxed)) {
+                LedState::Off => board_led.set_low(),
+                LedState::On => board_led.set_high(),
+                LedState::SlowFlash => {
+                    if count.is_multiple_of(8) {
                         board_led.toggle()
                     }
                 }
-                led_state::LedState::FastFlash => {
+                LedState::FastFlash => {
                     if count.is_multiple_of(2) {
                         board_led.toggle()
                     }
                 }
                 _ => {}
             }
+
             count = count.wrapping_add(1);
             wdt.feed();
-            Timer::after_millis(100).await;
+            ticker.next().await;
         }
     };
 
-    let _ = join(status_task, button_task::button_task(button, enable)).await;
+    // let _ = join(status_task, button_task::button_task(button, enable)).await;
+
+    status_task.await;
 
     loop {
         let _ = core::future::pending::<()>().await;
