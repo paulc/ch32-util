@@ -54,27 +54,6 @@ pub fn serial_write_u32(v: u32) {
     let _ = push(&buf[zeros..]);
 }
 
-#[inline(never)]
-pub fn serial_write_u64(v: u64) {
-    let mut buf = [b'0'; 20];
-    let mut n = v;
-    let mut idx = 20;
-
-    // Fill digits from right to left
-    while n > 0 && idx > 0 {
-        idx -= 1;
-        buf[idx] = b'0' + (n % 10) as u8;
-        n /= 10;
-    }
-    let zeros = buf
-        .iter()
-        .position(|&b| b != b'0')
-        .unwrap_or(buf.len())
-        .min(19);
-
-    let _ = push(&buf[zeros..]);
-}
-
 // Helper macro for serial_write...
 #[macro_export]
 macro_rules! serial_fmt {
@@ -82,16 +61,8 @@ macro_rules! serial_fmt {
     () => {};
 
     // Non-last items: comma must be present.
-    (BOOL($e:expr), $($rest:tt)*) => {
-        $crate::serial::serial_write_bool($e);
-        $crate::serial_fmt!($($rest)*);
-    };
     (U32($e:expr), $($rest:tt)*) => {
         $crate::serial::serial_write_u32($e);
-        $crate::serial_fmt!($($rest)*);
-    };
-    (U64($e:expr), $($rest:tt)*) => {
-        $crate::serial::serial_write_u64($e);
         $crate::serial_fmt!($($rest)*);
     };
     (HEX($e:expr), $($rest:tt)*) => {
@@ -104,16 +75,11 @@ macro_rules! serial_fmt {
     };
 
     // Last item: no trailing comma.
-    (BOOL($e:expr)) => { $crate::serial::serial_write_bool($e); };
     (U32($e:expr)) => { $crate::serial::serial_write_u32($e); };
     (HEX($e:expr)) => { $crate::serial::serial_write_hex($e); };
     ($e:expr) => { $crate::serial::serial_write($e); };
 }
 
-#[inline(never)]
-pub fn serial_write_bool(v: bool) {
-    let _ = push(if v { b"true" } else { b"false" });
-}
 /*
 ///
 /// Implement uFmt for formatted serial output - removed to save space

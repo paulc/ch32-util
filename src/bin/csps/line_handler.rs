@@ -2,21 +2,44 @@ use ch32_hal::i2c::I2c;
 use ch32_hal::mode::Blocking;
 use ch32_hal::peripherals::I2C1;
 
-use embassy_time::Instant;
 use portable_atomic::Ordering;
 
 use crate::parse::{parse_hex, parse_u32};
-use crate::serial::{serial_write, serial_write_hex, ECHO, LINE_CHANNEL};
+use crate::serial::{serial_write, serial_write_hex, serial_write_u32, ECHO, LINE_CHANNEL};
 use crate::serial_fmt;
-use crate::{IMON, LED_STATE, OFF_TIMER, ON_TIMER, POWER_STATE, PS_ALARM, PS_OK, UPTIME, VREF};
+use crate::{
+    IMON, LED_STATE, OFF_TIMER, ON_TIMER, POWER_OFF_DELAY, POWER_STATE, PS_ALARM, PS_OK, UPTIME,
+    VREF,
+};
 
-const CMDS: &[&str] = &["STATUS", "I2C", "ECHO", "POWER", "CANCEL"];
+const CMDS: &[&str] = &["STATUS", "I2C", "ECHO", "POWER", "CANCEL", "DELAY"];
 const CMDS_I2C: &[&str] = &["SCAN", "READ", "WRITE", "READ-REG"];
 const CMDS_ON_OFF: &[&str] = &["ON", "OFF"];
 
 #[inline(never)]
 fn lookup(s: &str, table: &[&str]) -> Option<usize> {
     table.iter().position(|&t| t == s)
+}
+
+#[inline(never)]
+fn status_line(label: &[u8], v: u32) {
+    serial_write(b">> ");
+    serial_write(label);
+    serial_write_u32(v);
+    serial_write(b"\r\n");
+}
+
+enum CmdError {
+    Invalid,
+    I2c,
+}
+
+#[inline(never)]
+fn write_error(e: CmdError) {
+    match e {
+        CmdError::Invalid => serial_write(b"!! ERR-CMD\r\n"),
+        CmdError::I2c => serial_write(b"!! ERR-I2C\r\n"),
+    }
 }
 
 #[embassy_executor::task]
@@ -29,27 +52,19 @@ pub async fn line_handler(mut i2c: I2c<'static, I2C1, Blocking>) {
             match it.next().and_then(|s| lookup(s, CMDS)) {
                 Some(0) => {
                     // STATUS
-                    serial_fmt!(
-                        b">> UPTIME_MS: ",
-                        U64(UPTIME.load(Ordering::Relaxed)),
-                        b"\r\n>> ON_TIMER: ",
-                        U64(ON_TIMER.load(Ordering::Relaxed)),
-                        b"\r\n>> OFF_TIMER: ",
-                        U64(OFF_TIMER.load(Ordering::Relaxed)),
-                        b"\r\n>> POWER_STATE: ",
-                        BOOL(POWER_STATE.load(Ordering::Relaxed)),
-                        b"\r\n>> LED STATE: ",
-                        U32(LED_STATE.load(Ordering::Relaxed) as u32),
-                        b"\r\n>> PS_OK: ",
-                        BOOL(PS_OK.load(Ordering::Relaxed)),
-                        b"\r\n>> PS_ALARM: ",
-                        BOOL(PS_ALARM.load(Ordering::Relaxed)),
-                        b"\r\n>> VREF: ",
-                        U32(VREF.load(Ordering::Relaxed) as u32),
-                        b"\r\n>> IMON: ",
-                        U32(IMON.load(Ordering::Relaxed) as u32),
-                        b"\r\n"
+                    status_line(b"UPTIME: ", UPTIME.load(Ordering::Relaxed));
+                    status_line(b"ON_TIMER: ", ON_TIMER.load(Ordering::Relaxed));
+                    status_line(b"OFF_TIMER: ", OFF_TIMER.load(Ordering::Relaxed));
+                    status_line(
+                        b"POWER_OFF_DELAY: ",
+                        POWER_OFF_DELAY.load(Ordering::Relaxed),
                     );
+                    status_line(b"POWER_STATE: ", POWER_STATE.load(Ordering::Relaxed) as u32);
+                    status_line(b"LED_STATE: ", LED_STATE.load(Ordering::Relaxed) as u32);
+                    status_line(b"PS_OK: ", PS_OK.load(Ordering::Relaxed) as u32);
+                    status_line(b"PS_ALARM: ", PS_ALARM.load(Ordering::Relaxed) as u32);
+                    status_line(b"VREF: ", VREF.load(Ordering::Relaxed) as u32);
+                    status_line(b"IMON: ", IMON.load(Ordering::Relaxed) as u32);
                 }
                 Some(1) => {
                     // I2C
@@ -86,10 +101,10 @@ pub async fn line_handler(mut i2c: I2c<'static, I2C1, Blocking>) {
                                     }
                                     serial_write(b"\r\n");
                                 } else {
-                                    serial_write(b"!! ERR-I2C\r\n");
+                                    write_error(CmdError::Invalid);
                                 }
                             } else {
-                                serial_write(b"!! ERR-CMD\r\n");
+                                write_error(CmdError::Invalid);
                             }
                         }
                         Some(2) => {
@@ -103,10 +118,10 @@ pub async fn line_handler(mut i2c: I2c<'static, I2C1, Blocking>) {
                                 if i2c.blocking_write(addr as u8, &buf[..len]).is_ok() {
                                     serial_write(b">> WRITE OK\r\n");
                                 } else {
-                                    serial_write(b"!! ERR-I2C\r\n");
+                                    write_error(CmdError::I2c);
                                 }
                             } else {
-                                serial_write(b"!! ERR-CMD\r\n");
+                                write_error(CmdError::Invalid);
                             }
                         }
                         Some(3) => {
@@ -129,10 +144,10 @@ pub async fn line_handler(mut i2c: I2c<'static, I2C1, Blocking>) {
                                     }
                                     serial_write(b"\r\n");
                                 } else {
-                                    serial_write(b"!! ERR-I2C\r\n");
+                                    write_error(CmdError::I2c);
                                 }
                             } else {
-                                serial_write(b"!! ERR-CMD\r\n");
+                                write_error(CmdError::Invalid);
                             }
                         }
                         _ => {}
@@ -163,20 +178,25 @@ pub async fn line_handler(mut i2c: I2c<'static, I2C1, Blocking>) {
                     match it.next().and_then(|s| lookup(s, CMDS_ON_OFF)) {
                         Some(0) => {
                             // POWER ON [SECS]
-                            let secs = it.next().map(parse_u32).unwrap_or(0) as u64;
-                            let on_time = Instant::now().as_millis() + (secs * 1000);
+                            let secs = it.next().map(parse_u32).unwrap_or(0).min(86_400);
+                            let on_time = UPTIME.load(Ordering::Relaxed) + secs;
                             ON_TIMER.store(on_time, Ordering::Relaxed);
-                            serial_fmt!(b">> POWER ON: ", U64(on_time), b"\r\n");
+                            serial_fmt!(b">> POWER ON: ", U32(on_time), b"\r\n");
                         }
                         Some(1) => {
                             // POWER OFF [SECS]
                             // Minimum of 5 sec power-off timer
-                            let secs = it.next().map(parse_u32).unwrap_or(0).max(5) as u64;
-                            let off_time = Instant::now().as_millis() + (secs * 1000);
+                            let secs = it
+                                .next()
+                                .map(parse_u32)
+                                .unwrap_or(0)
+                                .max(POWER_OFF_DELAY.load(Ordering::Relaxed))
+                                .min(86_400);
+                            let off_time = UPTIME.load(Ordering::Relaxed) + secs;
                             OFF_TIMER.store(off_time, Ordering::Relaxed);
-                            serial_fmt!(b">> POWER OFF: ", U64(off_time), b"\r\n");
+                            serial_fmt!(b">> POWER OFF: ", U32(off_time), b"\r\n");
                         }
-                        _ => serial_write(b"!! ERR-CMD\r\n"),
+                        _ => write_error(CmdError::Invalid),
                     }
                 }
                 Some(4) => {
@@ -185,16 +205,26 @@ pub async fn line_handler(mut i2c: I2c<'static, I2C1, Blocking>) {
                         Some(0) => {
                             // CANCEL ON
                             ON_TIMER.store(0, Ordering::Relaxed);
+                            serial_write(b">> OK\r\n");
                         }
                         Some(1) => {
                             // CANCEL OFF
                             OFF_TIMER.store(0, Ordering::Relaxed);
+                            serial_write(b">> OK\r\n");
                         }
-                        _ => serial_write(b"!! ERR-CMD\r\n"),
+                        _ => write_error(CmdError::Invalid),
                     }
                 }
-                Some(_) => serial_write(b"!! ERR-CMD\r\n"),
-                None => {}
+                Some(5) => {
+                    // DELAY SECS
+                    if let Some(secs) = it.next().map(parse_u32) {
+                        // Max 5-min power off delay
+                        POWER_OFF_DELAY.store(secs.min(600), Ordering::Relaxed);
+                    } else {
+                        write_error(CmdError::Invalid)
+                    }
+                }
+                Some(_) | None => write_error(CmdError::Invalid),
             }
             if ECHO.load(Ordering::Relaxed) {
                 serial_write(b"## ");

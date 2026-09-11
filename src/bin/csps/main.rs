@@ -13,7 +13,7 @@ use embassy_time::{Duration, Instant, Ticker};
 use ch32_util::chip_info::clear_reset;
 use ch32_util::iwdg::{Prescaler, Watchdog};
 
-use portable_atomic::{AtomicBool, AtomicU16, AtomicU64, AtomicU8, Ordering};
+use portable_atomic::{AtomicBool, AtomicU16, AtomicU32, AtomicU8, Ordering};
 
 mod led_state;
 mod line_handler;
@@ -25,9 +25,10 @@ use serial::serial_write;
 
 static POWER_STATE: AtomicBool = AtomicBool::new(false);
 static LED_STATE: AtomicU8 = AtomicU8::new(0);
-static UPTIME: AtomicU64 = AtomicU64::new(0);
-static ON_TIMER: AtomicU64 = AtomicU64::new(0);
-static OFF_TIMER: AtomicU64 = AtomicU64::new(0);
+static UPTIME: AtomicU32 = AtomicU32::new(0);
+static ON_TIMER: AtomicU32 = AtomicU32::new(0);
+static OFF_TIMER: AtomicU32 = AtomicU32::new(0);
+static POWER_OFF_DELAY: AtomicU32 = AtomicU32::new(5);
 static VREF: AtomicU16 = AtomicU16::new(0);
 static IMON: AtomicU16 = AtomicU16::new(0);
 static PS_OK: AtomicBool = AtomicBool::new(false);
@@ -119,12 +120,23 @@ async fn main(spawner: Spawner) -> ! {
         let mut button_ms = 0_u32;
         let mut off_warning = false;
 
+        // Track uptime from ms timer ticks (avoids u64_div_rem)
+        let mut last_ms = Instant::now().as_ticks() as u32; // TICK_HZ == 1000
+        let mut frac_ms = 0_u32;
+        let mut now_s = 0_u32;
+
         loop {
-            // Get current instant
-            let now_ms = Instant::now().as_millis();
+            // Get uptine in secs
+            let ms = Instant::now().as_ticks() as u32;
+            frac_ms += ms.wrapping_sub(last_ms);
+            last_ms = ms;
+            while frac_ms >= 1000 {
+                frac_ms -= 1000;
+                now_s = now_s.wrapping_add(1);
+            }
 
             // Update status
-            UPTIME.store(now_ms, Ordering::Relaxed);
+            UPTIME.store(now_s, Ordering::Relaxed);
             PS_OK.store(ps_ok.is_high(), Ordering::Relaxed);
             PS_ALARM.store(ps_alarm.is_high(), Ordering::Relaxed);
             VREF.store(
@@ -138,7 +150,8 @@ async fn main(spawner: Spawner) -> ! {
 
             // Check for off-warning
             off_warning = if OFF_TIMER.load(Ordering::Relaxed) > 0
-                && now_ms >= OFF_TIMER.load(Ordering::Relaxed) - 5000
+                && now_s
+                    >= OFF_TIMER.load(Ordering::Relaxed) - POWER_OFF_DELAY.load(Ordering::Relaxed)
             {
                 // Only send warning once
                 if !off_warning {
@@ -161,7 +174,7 @@ async fn main(spawner: Spawner) -> ! {
                 100..=500 => {
                     // Short Press
                     if !POWER_STATE.load(Ordering::Relaxed) {
-                        ON_TIMER.store(now_ms, Ordering::Relaxed);
+                        ON_TIMER.store(now_s, Ordering::Relaxed);
                     }
                     // If off-warning is active cancel
                     if off_warning {
@@ -171,14 +184,17 @@ async fn main(spawner: Spawner) -> ! {
                 2000..=5000 => {
                     // Long Press
                     if POWER_STATE.load(Ordering::Relaxed) {
-                        OFF_TIMER.store(now_ms + 5000, Ordering::Relaxed);
+                        OFF_TIMER.store(
+                            now_s + POWER_OFF_DELAY.load(Ordering::Relaxed),
+                            Ordering::Relaxed,
+                        );
                     }
                 }
                 _ => {}
             }
 
             // Check power on timer
-            if ON_TIMER.load(Ordering::Relaxed) > 0 && now_ms >= ON_TIMER.load(Ordering::Relaxed) {
+            if ON_TIMER.load(Ordering::Relaxed) > 0 && now_s >= ON_TIMER.load(Ordering::Relaxed) {
                 enable.set_high();
                 POWER_STATE.store(true, Ordering::Relaxed);
                 serial_write(b"!! POWER ON !!\r\n");
@@ -186,17 +202,7 @@ async fn main(spawner: Spawner) -> ! {
             }
 
             // Check power off timer
-            if OFF_TIMER.load(Ordering::Relaxed) > 0 && now_ms >= OFF_TIMER.load(Ordering::Relaxed)
-            {
-                enable.set_low();
-                POWER_STATE.store(false, Ordering::Relaxed);
-                serial_write(b"!! POWER OFF !!\r\n");
-                OFF_TIMER.store(0, Ordering::Relaxed);
-            }
-
-            // Check power off timer
-            if OFF_TIMER.load(Ordering::Relaxed) > 0 && now_ms >= OFF_TIMER.load(Ordering::Relaxed)
-            {
+            if OFF_TIMER.load(Ordering::Relaxed) > 0 && now_s >= OFF_TIMER.load(Ordering::Relaxed) {
                 enable.set_low();
                 POWER_STATE.store(false, Ordering::Relaxed);
                 serial_write(b"!! POWER OFF !!\r\n");
