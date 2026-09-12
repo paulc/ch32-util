@@ -54,6 +54,26 @@ pub fn serial_write_u32(v: u32) {
     let _ = push(&buf[zeros..]);
 }
 
+/// Print a fixed-point value: `raw` with `scale` fractional bits.
+/// serial_write_fixed(0x0C4C, 8, 3) -> "12.296"
+#[inline(never)]
+pub fn serial_write_fixed(raw: u16, scale: u8, digits: u8) {
+    serial_write_u32((raw >> scale) as u32);
+    if digits == 0 || scale == 0 {
+        return;
+    }
+    let mask = (1u32 << scale) - 1;
+    let mut f = raw as u32 & mask;
+    let mut out = [b'.'; 5];
+    let n = (digits as usize).min(4);
+    for i in 0..n {
+        f *= 10;
+        out[i + 1] = b'0' + (f >> scale) as u8;
+        f &= mask;
+    }
+    serial_write(&out[..n + 1]);
+}
+
 // Helper macro for serial_write...
 #[macro_export]
 macro_rules! serial_fmt {

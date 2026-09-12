@@ -5,16 +5,49 @@ use ch32_hal::peripherals::I2C1;
 use portable_atomic::Ordering;
 
 use crate::parse::{parse_hex, parse_u32};
-use crate::serial::{serial_write, serial_write_hex, serial_write_u32, ECHO, LINE_CHANNEL};
+use crate::serial::{
+    serial_write, serial_write_fixed, serial_write_hex, serial_write_u32, ECHO, LINE_CHANNEL,
+};
 use crate::serial_fmt;
 use crate::{
     IMON, LED_STATE, OFF_TIMER, ON_TIMER, POWER_OFF_DELAY, POWER_STATE, PS_ALARM, PS_OK, UPTIME,
     VREF,
 };
 
-const CMDS: &[&str] = &["STATUS", "I2C", "ECHO", "POWER", "CANCEL", "DELAY"];
+const CMDS: &[&str] = &["STATUS", "I2C", "ECHO", "POWER", "CANCEL", "DELAY", "DPS"];
 const CMDS_I2C: &[&str] = &["SCAN", "READ", "WRITE", "READ-REG"];
+const CMDS_DPS: &[&str] = &["READ", "STATUS"];
 const CMDS_ON_OFF: &[&str] = &["ON", "OFF"];
+
+const DPS_ADDR: u8 = 0x5f; // I2c address for controller (not SMBus)
+
+/// Read DPS register
+/// Thanks to DrTune for reverse-engineering protocol - https://github.com/raplin/DPS-1200FB
+fn dps_read(i2c: &mut I2c<'static, I2C1, Blocking>, cmd: u8) -> Result<u16, CmdError> {
+    let cs = (!(cmd.wrapping_add(DPS_ADDR << 1))).wrapping_add(1);
+    i2c.blocking_write(DPS_ADDR, &[cmd, cs])
+        .map_err(|_| CmdError::I2c)?;
+    let mut buf = [0u8; 3];
+    i2c.blocking_read(DPS_ADDR, &mut buf)
+        .map_err(|_| CmdError::I2c)?;
+    if buf.iter().fold(0u8, |a, &b| a.wrapping_add(b)) != 0 {
+        return Err(CmdError::Crc);
+    }
+    let raw = u16::from_le_bytes([buf[0], buf[1]]);
+    Ok(raw)
+}
+
+const DPS_CMDS: &[(&[u8], u8, u8, &[u8])] = &[
+    (b"Vin: ", 0x08, 5, b"V"),
+    (b"Iin: ", 0x0a, 7, b"A"),
+    (b"Pin: ", 0x0c, 1, b"W"),
+    (b"Vout: ", 0x0e, 8, b"V"),
+    (b"Iout: ", 0x10, 7, b"A"),
+    (b"Pout: ", 0x12, 1, b"W"),
+    (b"Tintake: ", 0x1a, 5, b"F"),
+    (b"Tinternal: ", 0x1c, 5, b"F"),
+    (b"Fan: ", 0x1e, 0, b"rpm"),
+];
 
 #[inline(never)]
 fn lookup(s: &str, table: &[&str]) -> Option<usize> {
@@ -32,6 +65,7 @@ fn status_line(label: &[u8], v: u32) {
 enum CmdError {
     Invalid,
     I2c,
+    Crc,
 }
 
 #[inline(never)]
@@ -39,6 +73,7 @@ fn write_error(e: CmdError) {
     match e {
         CmdError::Invalid => serial_write(b"!! ERR-CMD\r\n"),
         CmdError::I2c => serial_write(b"!! ERR-I2C\r\n"),
+        CmdError::Crc => serial_write(b"!! ERR-CRCC\r\n"),
     }
 }
 
@@ -84,13 +119,6 @@ pub async fn line_handler(mut i2c: I2c<'static, I2C1, Blocking>) {
                             let addr = it.next().map(parse_u32).filter(|&len| len <= 127);
                             let len = it.next().map(parse_u32).filter(|&len| len <= 16);
                             if let (Some(addr), Some(len)) = (addr, len) {
-                                serial_fmt!(
-                                    b">> I2C READ 0x",
-                                    HEX(addr as u8),
-                                    b" ",
-                                    U32(len),
-                                    b"\r\n"
-                                );
                                 if i2c
                                     .blocking_read(addr as u8, &mut buf[..len as usize])
                                     .is_ok()
@@ -132,10 +160,11 @@ pub async fn line_handler(mut i2c: I2c<'static, I2C1, Blocking>) {
                             let len = it.next().map(parse_u32).filter(|&len| len <= 16);
                             if let (Some(addr), Some(reg), Some(len)) = (addr, reg, len) {
                                 if i2c
-                                    .blocking_write(addr as u8, &[reg as u8])
-                                    .and_then(|_| {
-                                        i2c.blocking_read(addr as u8, &mut buf[..len as usize])
-                                    })
+                                    .blocking_write_read(
+                                        addr as u8,
+                                        &[reg as u8],
+                                        &mut buf[..len as usize],
+                                    )
                                     .is_ok()
                                 {
                                     serial_write(b">> ");
@@ -222,6 +251,55 @@ pub async fn line_handler(mut i2c: I2c<'static, I2C1, Blocking>) {
                         POWER_OFF_DELAY.store(secs.min(600), Ordering::Relaxed);
                     } else {
                         write_error(CmdError::Invalid)
+                    }
+                }
+                Some(6) => {
+                    // DPS
+                    match it.next().and_then(|s| lookup(s, CMDS_DPS)) {
+                        Some(0) => {
+                            // DPS READ <CMD> [SCALE]
+                            if let Some(cmd) = it.next().map(parse_u32).filter(|&len| len <= 127) {
+                                let scale = it.next().map(parse_u32).unwrap_or(0) as u8;
+                                match dps_read(&mut i2c, cmd as u8) {
+                                    Ok(v) => {
+                                        serial_write(b">> ");
+                                        if scale == 0 {
+                                            serial_write_u32(v as u32);
+                                        } else {
+                                            serial_write_fixed(v, scale, 3);
+                                        }
+                                        serial_write(b"\r\n");
+                                    }
+                                    Err(e) => write_error(e),
+                                }
+                            } else {
+                                write_error(CmdError::Invalid)
+                            }
+                        }
+                        Some(1) => {
+                            // DPS STATUS
+                            for (measure, cmd, scale, unit) in DPS_CMDS {
+                                match dps_read(&mut i2c, *cmd) {
+                                    Ok(v) => {
+                                        serial_write(b">> ");
+                                        serial_write(measure);
+                                        if *scale == 0 {
+                                            serial_write_u32(v as u32);
+                                        } else {
+                                            serial_write_fixed(v, *scale, 3);
+                                        }
+                                        serial_write(unit);
+                                        serial_write(b" [");
+                                        serial_write_hex((v >> 8) as u8);
+                                        serial_write_hex(v as u8);
+                                        serial_write(b"]");
+                                        serial_write(b"\r\n");
+                                    }
+                                    Err(e) => write_error(e),
+                                }
+                            }
+                        }
+                        _ => write_error(CmdError::Invalid),
                     }
                 }
                 Some(_) | None => write_error(CmdError::Invalid),
