@@ -44,8 +44,8 @@ const DPS_CMDS: &[(&[u8], u8, u8, &[u8])] = &[
     (b"Vout: ", 0x0e, 8, b"V"),
     (b"Iout: ", 0x10, 7, b"A"),
     (b"Pout: ", 0x12, 1, b"W"),
-    (b"Tintake: ", 0x1a, 5, b"F"),
-    (b"Tinternal: ", 0x1c, 5, b"F"),
+    (b"Tintake:   ", 0x1a, 6, b"C"),
+    (b"Tinternal: ", 0x1c, 6, b"C"),
     (b"Fan: ", 0x1e, 0, b"rpm"),
 ];
 
