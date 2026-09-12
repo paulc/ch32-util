@@ -25,11 +25,24 @@ fn push(mut data: &[u8]) -> Result<(), ()> {
 
 #[inline(never)]
 pub fn serial_write(data: &[u8]) {
+    // Drops data if TX_PIPE full
     let _ = push(data);
 }
 
 #[inline(never)]
+#[allow(unused)]
+/// Write with back-pressure in case we are overflowing TX_PIPE
+/// (adds async yield point so use sparingly)
+pub async fn serial_write_async(mut data: &[u8]) {
+    while !data.is_empty() {
+        let n = TX_PIPE.write(data).await;
+        data = &data[n..];
+    }
+}
+
+#[inline(never)]
 pub fn serial_write_hex(v: u8) {
+    // Drops data if TX_PIPE full
     let _ = push(&[HEX[(v >> 4) as usize], HEX[(v & 0x0f) as usize]]);
 }
 
@@ -51,6 +64,7 @@ pub fn serial_write_u32(v: u32) {
         .unwrap_or(buf.len())
         .min(9);
 
+    // Drops data if TX_PIPE full
     let _ = push(&buf[zeros..]);
 }
 

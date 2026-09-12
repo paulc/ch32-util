@@ -38,14 +38,15 @@ fn dps_read(i2c: &mut I2c<'static, I2C1, Blocking>, cmd: u8) -> Result<u16, CmdE
 }
 
 const DPS_CMDS: &[(&[u8], u8, u8, &[u8])] = &[
+    (b"On: ", 0x30, 1, b"s"),
     (b"Vin: ", 0x08, 5, b"V"),
     (b"Iin: ", 0x0a, 7, b"A"),
     (b"Pin: ", 0x0c, 1, b"W"),
     (b"Vout: ", 0x0e, 8, b"V"),
     (b"Iout: ", 0x10, 7, b"A"),
     (b"Pout: ", 0x12, 1, b"W"),
-    (b"Tintake:   ", 0x1a, 6, b"C"),
-    (b"Tinternal: ", 0x1c, 6, b"C"),
+    (b"Text: ", 0x1a, 6, b"C"),
+    (b"Tint: ", 0x1c, 6, b"C"),
     (b"Fan: ", 0x1e, 0, b"rpm"),
 ];
 
