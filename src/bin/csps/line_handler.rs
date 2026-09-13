@@ -14,7 +14,9 @@ use crate::{
     VREF,
 };
 
-const CMDS: &[&str] = &["STATUS", "I2C", "ECHO", "POWER", "CANCEL", "DELAY", "DPS"];
+const CMDS: &[&str] = &[
+    "STATUS", "I2C", "ECHO", "POWER", "CANCEL", "DELAY", "DPS", "STACK",
+];
 const CMDS_I2C: &[&str] = &["SCAN", "READ", "WRITE", "READ-REG"];
 const CMDS_DPS: &[&str] = &["READ", "STATUS"];
 const CMDS_ON_OFF: &[&str] = &["ON", "OFF"];
@@ -87,7 +89,6 @@ pub async fn line_handler(mut i2c: I2c<'static, I2C1, Blocking>) {
             let mut it = line.split_ascii_whitespace();
             match it.next().and_then(|s| lookup(s, CMDS)) {
                 Some(0) => {
-                    // STATUS
                     status_line(b"UPTIME: ", UPTIME.load(Ordering::Relaxed));
                     status_line(b"ON_TIMER: ", ON_TIMER.load(Ordering::Relaxed));
                     status_line(b"OFF_TIMER: ", OFF_TIMER.load(Ordering::Relaxed));
@@ -295,6 +296,7 @@ pub async fn line_handler(mut i2c: I2c<'static, I2C1, Blocking>) {
                                         serial_write_hex(v as u8);
                                         serial_write(b"]");
                                         serial_write(b"\r\n");
+                                        embassy_futures::yield_now().await;
                                     }
                                     Err(e) => write_error(e),
                                 }
@@ -302,6 +304,10 @@ pub async fn line_handler(mut i2c: I2c<'static, I2C1, Blocking>) {
                         }
                         _ => write_error(CmdError::Invalid),
                     }
+                }
+                Some(7) => {
+                    // STACK
+                    crate::stack::print_stack();
                 }
                 Some(_) | None => write_error(CmdError::Invalid),
             }

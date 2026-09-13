@@ -19,6 +19,7 @@ mod led_state;
 mod line_handler;
 mod parse;
 mod serial;
+mod stack;
 
 use led_state::LedState;
 use serial::serial_write;
@@ -43,16 +44,14 @@ ch32_hal::bind_interrupts!(struct Irqs {
 
 #[embassy_executor::main(entry = "qingke_rt::entry")]
 async fn main(spawner: Spawner) -> ! {
+    // Paint stack at init
+    stack::paint_stack();
+
     let mut config = ch32_hal::Config::default();
     config.rcc = ch32_hal::rcc::Config::SYSCLK_FREQ_48MHZ_HSI;
     let p = ch32_hal::init(config);
 
     clear_reset();
-
-    let mut wdt = match Watchdog::start(Prescaler::Div256, WATCHDOG_MS) {
-        Ok(w) => w,
-        Err(_) => panic!("watchdog"),
-    };
 
     // IO Pins
     let board_led = p.PC0;
@@ -66,9 +65,6 @@ async fn main(spawner: Spawner) -> ! {
     let mcu_rx = p.PD6;
     let mut imon = p.PA1;
     let ps_ok = p.PA2;
-
-    // I2C
-    let i2c = I2c::new_blocking(p.I2C1, scl, sda, Hertz::hz(100_000), Default::default());
 
     // Serial
     let uart_config = usart::Config::default(); // 115200,N,8,1
@@ -98,6 +94,13 @@ async fn main(spawner: Spawner) -> ! {
         Ok(t) => spawner.spawn(t),
         Err(_) => panic!("serial_write"),
     }
+
+    serial_write(b"-- [[ CH32V003 CSPS ]] --\r\n");
+    stack::print_stack();
+
+    // I2C
+    let i2c = I2c::new_blocking(p.I2C1, scl, sda, Hertz::hz(100_000), Default::default());
+
     match line_handler::line_handler(i2c) {
         Ok(t) => spawner.spawn(t),
         Err(_) => panic!("line_handler"),
@@ -111,6 +114,12 @@ async fn main(spawner: Spawner) -> ! {
     let ps_alarm = Input::new(ps_alarm, Pull::Down);
     let ps_ok = Input::new(ps_ok, Pull::Down);
     let mut adc = Adc::new(p.ADC1, Default::default());
+
+    // Watchdog
+    let mut wdt = match Watchdog::start(Prescaler::Div256, WATCHDOG_MS) {
+        Ok(w) => w,
+        Err(_) => panic!("watchdog"),
+    };
 
     const STATUS_TICKER_MS: u32 = 50;
 

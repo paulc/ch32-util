@@ -153,7 +153,6 @@ macro_rules! serial_print {
 pub async fn serial_read_task(
     mut rx: usart::UartRx<'static, ch32_hal::peripherals::USART1, ch32_hal::mode::Async>,
 ) {
-    serial_write(b"-- [[ CH32V003 ]] --\r\n");
     let mut buf = [0u8; 64];
     let mut line_buf = heapless::String::<64>::new();
     let mut crlf = false;
